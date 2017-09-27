@@ -1,0 +1,11 @@
+/.*.o.cmd
+/*.o
+/tags
+/.altera_tse_main.o.d
+<<<<<<< HEAD
+/Module.symvers
+/altera_tse.ko
+/altera_tse.mod.c
+/modules.order
+/.altera_tse.ko.cmd
+/.tmp_versions/

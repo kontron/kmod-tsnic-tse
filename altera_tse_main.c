@@ -33,6 +33,7 @@
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/init.h>
+#include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -44,6 +45,7 @@
 #include <linux/of_net.h>
 #include <linux/of_platform.h>
 #include <linux/phy.h>
+#include <linux/phy_fixed.h>
 #include <linux/platform_device.h>
 #include <linux/skbuff.h>
 #include <asm/cacheflush.h>
@@ -52,6 +54,8 @@
 #include "altera_tse.h"
 #include "altera_sgdma.h"
 #include "altera_msgdma.h"
+
+static const struct altera_dmaops altera_dtype_msgdma;
 
 static atomic_t instance_count = ATOMIC_INIT(~0);
 /* Module parameters */
@@ -463,6 +467,7 @@ static int tse_tx_complete(struct altera_tse_private *priv)
 	spin_lock(&priv->tx_lock);
 
 	ready = priv->dmaops->tx_completions(priv);
+printk("ready=%d\n", ready);
 
 	/* Free sent buffers */
 	while (ready && (priv->tx_cons != priv->tx_prod)) {
@@ -589,7 +594,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		ret = NETDEV_TX_BUSY;
 		goto out;
 	}
-
+printk("avail: %d\n", tse_tx_avail(priv));
 	/* Map the first skb fragment */
 	entry = priv->tx_prod % txsize;
 	buffer = &priv->tx_ring[entry];
@@ -611,12 +616,15 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	skb_tx_timestamp(skb);
 
 	priv->tx_prod++;
+printk("%s: tx->cons=%d tx->prods=%d\n", __FUNCTION__, priv->tx_cons, priv->tx_prod);
+printk("%s: entry=%d\n", __FUNCTION__, entry);
 	dev->stats.tx_bytes += skb->len;
 
 	if (unlikely(tse_tx_avail(priv) <= TXQUEUESTOP_THRESHHOLD)) {
 		if (netif_msg_hw(priv))
 			netdev_dbg(priv->dev, "%s: stop transmitted packets\n",
 				   __func__);
+		printk("%s: stop transmitted packets\n", __func__);
 		netif_stop_queue(dev);
 	}
 
@@ -859,6 +867,32 @@ static int init_phy(struct net_device *dev)
 		   phydev->mdio.addr, phydev->phy_id, phydev->link);
 
 	return 0;
+}
+
+static int init_phy_direct(struct net_device *dev)
+{
+	struct fixed_phy_status fphy_status = {
+		.link = 1,
+		.speed = SPEED_1000,
+		.duplex = DUPLEX_FULL,
+	};
+	struct phy_device *phy_dev;
+	int err;
+
+	phy_dev = fixed_phy_register(PHY_POLL, &fphy_status, -1, NULL);
+	if (!phy_dev || IS_ERR(phy_dev)) {
+		dev_err(&dev->dev, "Failed to register fixed PHY device\n");
+		return -ENODEV;
+	}
+
+	err = phy_connect_direct(dev, phy_dev, altera_tse_adjust_link,
+				 PHY_INTERFACE_MODE_GMII);
+	if (err) {
+		dev_err(&dev->dev, "Connecting PHY failed\n");
+		return err;
+	}
+
+	return err;
 }
 
 static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
@@ -1223,7 +1257,6 @@ static int tse_open(struct net_device *dev)
 		goto alloc_skbuf_error;
 	}
 
-
 	/* Register RX interrupt */
 	ret = request_irq(priv->rx_irq, altera_isr, IRQF_SHARED,
 			  dev->name, dev);
@@ -1298,9 +1331,11 @@ static int tse_shutdown(struct net_device *dev)
 	priv->dmaops->disable_txirq(priv);
 	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 
+#if 0
 	/* Free the IRQ lines */
 	free_irq(priv->rx_irq, dev);
 	free_irq(priv->tx_irq, dev);
+#endif
 
 	/* disable and reset the MAC, empties fifo */
 	spin_lock(&priv->mac_cfg_lock);
@@ -1598,7 +1633,6 @@ static int altera_tse_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, ndev);
 
 	priv->revision = ioread32(&priv->mac_dev->megacore_revision);
-
 	if (netif_msg_probe(priv))
 		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
 			 (priv->revision >> 8) & 0xff,
@@ -1643,6 +1677,241 @@ static int altera_tse_remove(struct platform_device *pdev)
 	free_netdev(ndev);
 
 	return 0;
+}
+
+static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+{
+	struct net_device *ndev;
+	int ret = -ENODEV;
+	struct altera_tse_private *priv;
+	void __iomem *base;
+
+	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
+	if (!ndev) {
+		dev_err(&pdev->dev, "Could not allocate network device\n");
+		return -ENODEV;
+	}
+
+	SET_NETDEV_DEV(ndev, &pdev->dev);
+	pci_set_drvdata(pdev, ndev);
+
+	priv = netdev_priv(ndev);
+	priv->device = &pdev->dev;
+	priv->dev = ndev;
+	priv->msg_enable = netif_msg_init(debug, default_msg_level);
+
+
+	ret = pci_enable_device_mem(pdev);
+	if (ret)
+		return ret;
+
+    if (pci_request_region(pdev, 0, "altera tse")) {
+        dev_err(&(pdev->dev), "pci_request_region\n");
+        goto error;
+    }
+
+    base = pci_iomap(pdev, 0, 0);
+
+	/* single supportded dma mode, for now? */
+	priv->dmaops = &altera_dtype_msgdma;
+
+	if (priv->dmaops &&
+		   priv->dmaops->altera_dtype == ALTERA_DTYPE_MSGDMA) {
+		// priv->rx_dma_resp = base + 0x4a0;
+		priv->rx_dma_resp = base + 0x8a8;
+
+		// priv->tx_dma_desc = base + 0x420;
+		priv->tx_dma_desc = base + 0x840;
+#if 0
+		priv->txdescmem = 0x20;
+		priv->txdescmem_busaddr = (dma_addr_t) (base + 0x420); // TODO: is this a phy addr?
+#endif
+
+		// priv->rx_dma_desc = base + 0x480;
+		priv->rx_dma_desc = base + 0x820;
+#if 0
+		priv->rxdescmem = 0x20;
+		priv->rxdescmem_busaddr = (dma_addr_t)virt_to_bus(base + 0x480); // TODO: is this a phy addr?
+#endif
+	} else {
+		ret = -ENODEV;
+		goto err_free_netdev;
+	}
+
+	if (!dma_set_mask(priv->device, DMA_BIT_MASK(priv->dmaops->dmamask)))
+		dma_set_coherent_mask(priv->device,
+				      DMA_BIT_MASK(priv->dmaops->dmamask));
+	else if (!dma_set_mask(priv->device, DMA_BIT_MASK(32)))
+		dma_set_coherent_mask(priv->device, DMA_BIT_MASK(32));
+	else
+		goto err_free_netdev;
+
+	/* MAC address space */
+	priv->mac_dev = base;
+
+	/* xSGDMA Rx Dispatcher address space */
+	priv->rx_dma_csr = base + 0x860;
+
+	/* xSGDMA Tx Dispatcher address space */
+	priv->tx_dma_csr = base + 0x880;
+
+#if 0
+	/* Rx IRQ */
+	priv->rx_irq = platform_get_irq_byname(pdev, "rx_irq");
+	if (priv->rx_irq == -ENXIO) {
+		dev_err(&pdev->dev, "cannot obtain Rx IRQ\n");
+		ret = -ENXIO;
+		goto err_free_netdev;
+	}
+
+	/* Tx IRQ */
+	priv->tx_irq = platform_get_irq_byname(pdev, "tx_irq");
+	if (priv->tx_irq == -ENXIO) {
+		dev_err(&pdev->dev, "cannot obtain Tx IRQ\n");
+		ret = -ENXIO;
+		goto err_free_netdev;
+	}
+#endif
+
+	/* FIFO depths must match with design */
+	priv->rx_fifo_depth = 2048;
+	priv->tx_fifo_depth = 2048;
+
+	/* hash filter settings for this instance */
+	priv->hash_filter = 1;
+
+	/* Set hash filter to not set for now until the
+	 * multicast filter receive issue is debugged
+	 */
+	priv->hash_filter = 0;
+
+	/* supplemental address settings for this instance must match with design */
+	priv->added_unicast = 1;
+
+#if 0
+	priv->dev->min_mtu = ETH_ZLEN + ETH_FCS_LEN;
+	/* Max MTU is 1500, ETH_DATA_LEN */
+	priv->dev->max_mtu = ETH_DATA_LEN;
+#else
+	/* Max MTU is 1500, ETH_DATA_LEN */
+	priv->max_mtu = ETH_DATA_LEN + 2;
+#endif
+
+#if 0
+	/* Get the max mtu from the device tree. Note that the
+	 * "max-frame-size" parameter is actually max mtu. Definition
+	 * in the ePAPR v1.1 spec and usage differ, so go with usage.
+	 */
+#endif
+
+	/* The DMA buffer size already accounts for an alignment bias
+	 * to avoid unaligned access exceptions for the host processor,
+	 */
+	priv->rx_dma_buf_sz = ALTERA_RXDMABUFFER_SIZE;
+
+	/* set random MAC address */
+	eth_hw_addr_random(ndev);
+	/* TODO: read MAC address from some EEPROM */
+
+#if 0
+	/* get phy addr and create mdio */
+	ret = altera_tse_phy_get_addr_mdio_create(ndev);
+
+	if (ret)
+		goto err_free_netdev;
+#endif
+
+	/* initialize netdev */
+	ndev->mem_start = pci_resource_start(pdev, 0);
+	ndev->mem_end = ndev->mem_start + 0x400;
+	ndev->netdev_ops = &altera_tse_netdev_ops;
+	altera_tse_set_ethtool_ops(ndev);
+
+	altera_tse_netdev_ops.ndo_set_rx_mode = tse_set_rx_mode;
+
+	if (priv->hash_filter)
+		altera_tse_netdev_ops.ndo_set_rx_mode =
+			tse_set_rx_mode_hashfilter;
+
+	/* Scatter/gather IO is not supported,
+	 * so it is turned off
+	 */
+	ndev->hw_features &= ~NETIF_F_SG;
+	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+
+	/* VLAN offloading of tagging, stripping and filtering is not
+	 * supported by hardware, but driver will accommodate the
+	 * extra 4-byte VLAN tag for processing by upper layers
+	 */
+	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX;
+
+	/* setup NAPI interface */
+	netif_napi_add(ndev, &priv->napi, tse_poll, NAPI_POLL_WEIGHT);
+
+	spin_lock_init(&priv->mac_cfg_lock);
+	spin_lock_init(&priv->tx_lock);
+	spin_lock_init(&priv->rxdma_irq_lock);
+
+	netif_carrier_off(ndev);
+	ret = register_netdev(ndev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register TSE net device\n");
+		goto err_register_netdev;
+	}
+
+	priv->revision = ioread32(&priv->mac_dev->megacore_revision);
+
+	if (netif_msg_probe(priv))
+		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
+			 (priv->revision >> 8) & 0xff,
+			 priv->revision & 0xff,
+			 (unsigned long) ndev->mem_start, priv->rx_irq,
+			 priv->tx_irq);
+
+	// TODO: init fixed link parameters
+	ret = init_phy_direct(ndev);
+	if (ret != 0) {
+		netdev_err(ndev, "Cannot attach to PHY (error: %d)\n", ret);
+		printk("Cannot attach to PHY (error: %d)\n", ret);
+		goto err_init_phy;
+	}
+
+	return 0;
+
+err_init_phy:
+	unregister_netdev(ndev);
+
+err_register_netdev:
+	netif_napi_del(&priv->napi);
+#if 0
+	altera_tse_mdio_destroy(ndev);
+#endif
+err_free_netdev:
+	free_netdev(ndev);
+error:
+	pci_disable_device(pdev);
+	return ret;
+}
+
+static void altera_tse_pci_remove(struct pci_dev *pdev)
+{
+	struct net_device *ndev = pci_get_drvdata(pdev);
+	struct altera_tse_private *priv = netdev_priv(ndev);
+
+	if (ndev->phydev) {
+		phy_disconnect(ndev->phydev);
+	}
+
+	// TODO: no mdio support yet
+#if 0
+	altera_tse_mdio_destroy(ndev);
+#endif
+	unregister_netdev(ndev);
+	pci_set_drvdata(pdev, NULL);
+	pci_iounmap(pdev, priv->mac_dev);
+	pci_release_region(pdev, 0);
+	free_netdev(ndev);
+	pci_disable_device(pdev);
 }
 
 static const struct altera_dmaops altera_dtype_sgdma = {
@@ -1702,7 +1971,60 @@ static struct platform_driver altera_tse_driver = {
 	},
 };
 
-module_platform_driver(altera_tse_driver);
+static const struct pci_device_id altera_tse_pci_tbl[] = {
+	{PCI_DEVICE(0x1059, 0xa100)},
+	{PCI_DEVICE(0xa100, 0x1059)},
+	{0, }
+};
+
+MODULE_DEVICE_TABLE(pci, altera_tse_pci_tbl);
+
+static struct pci_driver altera_tse_pci_driver = {
+	.name     = "altera tse",
+	.id_table = altera_tse_pci_tbl,
+	.probe    = altera_tse_pci_probe,
+	.remove   = altera_tse_pci_remove,
+#ifdef CONFIG_PM
+	.driver.pm = NULL,
+#endif
+#if 0
+	.shutdown = igb_shutdown,
+	.sriov_configure = igb_pci_sriov_configure,
+	.err_handler = &igb_err_handler
+#endif
+};
+
+static int __init altera_tse_init_module(void)
+{
+	int rv;
+
+#ifdef CONFIG_PCI
+	rv = pci_register_driver(&altera_tse_pci_driver);
+	if (rv)
+		pr_err("Unable to register PCI driver: %d\n", rv);
+#endif
+
+	rv = platform_driver_register(&altera_tse_driver);
+	if (rv)
+		pr_err("Unable to register platform driver: %d\n", rv);
+
+	return rv;
+}
+
+module_init(altera_tse_init_module);
+
+
+static void altera_tse_exit_module(void)
+{
+#ifdef CONFIG_PCI
+	pci_unregister_driver(&altera_tse_pci_driver);
+#endif
+
+	platform_driver_unregister(&altera_tse_driver);
+}
+
+module_exit(altera_tse_exit_module);
+
 
 MODULE_AUTHOR("Altera Corporation");
 MODULE_DESCRIPTION("Altera Triple Speed Ethernet MAC driver");
