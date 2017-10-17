@@ -77,6 +77,11 @@ static int dma_tx_num = TX_DESCRIPTORS;
 module_param(dma_tx_num, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(dma_tx_num, "Number of descriptors in the TX list");
 
+#define MAC_LOOPBACK 0
+static int mac_loopback = MAC_LOOPBACK;
+module_param(mac_loopback, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(mac_loopback, "Enable MAC Loopback");
+
 
 #define POLL_PHY (-1)
 
@@ -1032,6 +1037,11 @@ static void tse_set_mac(struct altera_tse_private *priv, bool enable)
 		value |= MAC_CMDCFG_TX_ENA | MAC_CMDCFG_RX_ENA;
 	else
 		value &= ~(MAC_CMDCFG_TX_ENA | MAC_CMDCFG_RX_ENA);
+
+	if (mac_loopback && enable)
+		value |= MAC_CMDCFG_LOOP_ENA;
+	else
+		value &= ~MAC_CMDCFG_LOOP_ENA;
 
 	csrwr32(value, priv->mac_dev, tse_csroffs(command_config));
 }
