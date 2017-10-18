@@ -99,7 +99,30 @@ MODULE_PARM_DESC(mac_loopback, "Enable MAC Loopback");
 
 #define TXQUEUESTOP_THRESHHOLD	2
 
+struct altera_tse_kontron_driver_data
+{
+	int rx_dma_resp_offset;
+	int tx_dma_desc_offset;
+	int rx_dma_desc_offset;
+	int mac_dev_offset;
+	int rx_dma_csr_offset;
+	int tx_dma_csr_offset;
+
+	const struct altera_dmaops *dmaops;
+
+	int rx_irq;
+	int tx_irq;
+
+	int rx_fifo_depth;
+	int tx_fifo_depth;
+	int hash_filter;
+	int added_unicast;
+	int max_mtu;
+};
+
 static const struct of_device_id altera_tse_ids[];
+static const struct altera_tse_kontron_driver_data kontron_drv_data[];
+
 
 static inline u32 tse_tx_avail(struct altera_tse_private *priv)
 {
@@ -472,7 +495,6 @@ static int tse_tx_complete(struct altera_tse_private *priv)
 	spin_lock(&priv->tx_lock);
 
 	ready = priv->dmaops->tx_completions(priv);
-printk("ready=%d\n", ready);
 
 	/* Free sent buffers */
 	while (ready && (priv->tx_cons != priv->tx_prod)) {
@@ -599,7 +621,6 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		ret = NETDEV_TX_BUSY;
 		goto out;
 	}
-printk("avail: %d\n", tse_tx_avail(priv));
 	/* Map the first skb fragment */
 	entry = priv->tx_prod % txsize;
 	buffer = &priv->tx_ring[entry];
@@ -621,15 +642,12 @@ printk("avail: %d\n", tse_tx_avail(priv));
 	skb_tx_timestamp(skb);
 
 	priv->tx_prod++;
-printk("%s: tx->cons=%d tx->prods=%d\n", __FUNCTION__, priv->tx_cons, priv->tx_prod);
-printk("%s: entry=%d\n", __FUNCTION__, entry);
 	dev->stats.tx_bytes += skb->len;
 
 	if (unlikely(tse_tx_avail(priv) <= TXQUEUESTOP_THRESHHOLD)) {
 		if (netif_msg_hw(priv))
 			netdev_dbg(priv->dev, "%s: stop transmitted packets\n",
 				   __func__);
-		printk("%s: stop transmitted packets\n", __func__);
 		netif_stop_queue(dev);
 	}
 
@@ -1694,6 +1712,8 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 	struct net_device *ndev;
 	int ret = -ENODEV;
 	struct altera_tse_private *priv;
+	const struct altera_tse_kontron_driver_data *driver_data =
+			&kontron_drv_data[ent->driver_data];
 	void __iomem *base;
 
 	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
@@ -1710,85 +1730,66 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 	priv->dev = ndev;
 	priv->msg_enable = netif_msg_init(debug, default_msg_level);
 
-
 	ret = pci_enable_device_mem(pdev);
 	if (ret)
 		return ret;
 
-    if (pci_request_region(pdev, 0, "altera tse")) {
-        dev_err(&(pdev->dev), "pci_request_region\n");
-        goto error;
-    }
+	if (pci_request_region(pdev, 1, "altera tse")) {
+		dev_err(&(pdev->dev), "pci_request_region\n");
+		goto error;
+	}
 
-    base = pci_iomap(pdev, 0, 0);
+	pci_set_master(pdev);
 
-	/* single supportded dma mode, for now? */
-	priv->dmaops = &altera_dtype_msgdma;
+	base = pci_iomap(pdev, 1, 0);
+
+	/* single supported DMA mode, for now? */
+	priv->dmaops = driver_data->dmaops;
 
 	if (priv->dmaops &&
 		   priv->dmaops->altera_dtype == ALTERA_DTYPE_MSGDMA) {
-		// priv->rx_dma_resp = base + 0x4a0;
-		priv->rx_dma_resp = base + 0x8a8;
-
-		// priv->tx_dma_desc = base + 0x420;
-		priv->tx_dma_desc = base + 0x840;
-#if 0
-		priv->txdescmem = 0x20;
-		priv->txdescmem_busaddr = (dma_addr_t) (base + 0x420); // TODO: is this a phy addr?
-#endif
-
-		// priv->rx_dma_desc = base + 0x480;
-		priv->rx_dma_desc = base + 0x820;
-#if 0
-		priv->rxdescmem = 0x20;
-		priv->rxdescmem_busaddr = (dma_addr_t)virt_to_bus(base + 0x480); // TODO: is this a phy addr?
-#endif
+		priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
+		priv->tx_dma_desc = base + driver_data->tx_dma_desc_offset;
+		priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
 	} else {
 		ret = -ENODEV;
 		goto err_free_netdev;
 	}
 
-	if (!dma_set_mask(priv->device, DMA_BIT_MASK(priv->dmaops->dmamask)))
-		dma_set_coherent_mask(priv->device,
-				      DMA_BIT_MASK(priv->dmaops->dmamask));
-	else if (!dma_set_mask(priv->device, DMA_BIT_MASK(32)))
-		dma_set_coherent_mask(priv->device, DMA_BIT_MASK(32));
-	else
-		goto err_free_netdev;
+	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(priv->dmaops->dmamask))) {
+		if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))) {
+			dev_err(&pdev->dev, "No usable DMA configuration, aborting\n");
+			goto err_free_netdev;
+		}
+	}
 
 	/* MAC address space */
-	priv->mac_dev = base;
+	priv->mac_dev = base + driver_data->mac_dev_offset;
 
 	/* xSGDMA Rx Dispatcher address space */
-	priv->rx_dma_csr = base + 0x860;
+	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
 
 	/* xSGDMA Tx Dispatcher address space */
-	priv->tx_dma_csr = base + 0x880;
+	priv->tx_dma_csr = base + driver_data->tx_dma_csr_offset;
 
-#if 0
+	printk("num int vec=%d\n", pci_alloc_irq_vectors(pdev, 1, 32, PCI_IRQ_MSI | PCI_IRQ_MSIX));
+
 	/* Rx IRQ */
-	priv->rx_irq = platform_get_irq_byname(pdev, "rx_irq");
-	if (priv->rx_irq == -ENXIO) {
-		dev_err(&pdev->dev, "cannot obtain Rx IRQ\n");
-		ret = -ENXIO;
-		goto err_free_netdev;
-	}
+	priv->rx_irq = pci_irq_vector(pdev, driver_data->rx_irq);
 
 	/* Tx IRQ */
-	priv->tx_irq = platform_get_irq_byname(pdev, "tx_irq");
-	if (priv->tx_irq == -ENXIO) {
-		dev_err(&pdev->dev, "cannot obtain Tx IRQ\n");
-		ret = -ENXIO;
-		goto err_free_netdev;
-	}
+	priv->tx_irq = pci_irq_vector(pdev, driver_data->tx_irq);
+printk("rx_irq=%d, tx_irq=%d\n", priv->rx_irq, priv->tx_irq);
+#if 0
+	priv->tx_irq = priv->rx_irq = -1;
 #endif
 
 	/* FIFO depths must match with design */
-	priv->rx_fifo_depth = 2048;
-	priv->tx_fifo_depth = 2048;
+	priv->rx_fifo_depth = driver_data->rx_fifo_depth;
+	priv->tx_fifo_depth = driver_data->tx_fifo_depth;
 
 	/* hash filter settings for this instance */
-	priv->hash_filter = 1;
+	priv->hash_filter = driver_data->hash_filter;
 
 	/* Set hash filter to not set for now until the
 	 * multicast filter receive issue is debugged
@@ -1796,23 +1797,10 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 	priv->hash_filter = 0;
 
 	/* supplemental address settings for this instance must match with design */
-	priv->added_unicast = 1;
+	priv->added_unicast = driver_data->added_unicast;
 
-#if 0
-	priv->dev->min_mtu = ETH_ZLEN + ETH_FCS_LEN;
 	/* Max MTU is 1500, ETH_DATA_LEN */
-	priv->dev->max_mtu = ETH_DATA_LEN;
-#else
-	/* Max MTU is 1500, ETH_DATA_LEN */
-	priv->max_mtu = ETH_DATA_LEN + 2;
-#endif
-
-#if 0
-	/* Get the max mtu from the device tree. Note that the
-	 * "max-frame-size" parameter is actually max mtu. Definition
-	 * in the ePAPR v1.1 spec and usage differ, so go with usage.
-	 */
-#endif
+	priv->max_mtu = driver_data->max_mtu;
 
 	/* The DMA buffer size already accounts for an alignment bias
 	 * to avoid unaligned access exceptions for the host processor,
@@ -1823,17 +1811,9 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 	eth_hw_addr_random(ndev);
 	/* TODO: read MAC address from some EEPROM */
 
-#if 0
-	/* get phy addr and create mdio */
-	ret = altera_tse_phy_get_addr_mdio_create(ndev);
-
-	if (ret)
-		goto err_free_netdev;
-#endif
-
 	/* initialize netdev */
-	ndev->mem_start = pci_resource_start(pdev, 0);
-	ndev->mem_end = ndev->mem_start + 0x400;
+	ndev->mem_start = pci_resource_start(pdev, 1);
+	ndev->mem_end = pci_resource_end(pdev, 1);
 	ndev->netdev_ops = &altera_tse_netdev_ops;
 	altera_tse_set_ethtool_ops(ndev);
 
@@ -1878,11 +1858,9 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 			 (unsigned long) ndev->mem_start, priv->rx_irq,
 			 priv->tx_irq);
 
-	// TODO: init fixed link parameters
 	ret = init_phy_direct(ndev);
 	if (ret != 0) {
 		netdev_err(ndev, "Cannot attach to PHY (error: %d)\n", ret);
-		printk("Cannot attach to PHY (error: %d)\n", ret);
 		goto err_init_phy;
 	}
 
@@ -1893,9 +1871,6 @@ err_init_phy:
 
 err_register_netdev:
 	netif_napi_del(&priv->napi);
-#if 0
-	altera_tse_mdio_destroy(ndev);
-#endif
 err_free_netdev:
 	free_netdev(ndev);
 error:
@@ -1912,14 +1887,10 @@ static void altera_tse_pci_remove(struct pci_dev *pdev)
 		phy_disconnect(ndev->phydev);
 	}
 
-	// TODO: no mdio support yet
-#if 0
-	altera_tse_mdio_destroy(ndev);
-#endif
 	unregister_netdev(ndev);
 	pci_set_drvdata(pdev, NULL);
 	pci_iounmap(pdev, priv->mac_dev);
-	pci_release_region(pdev, 0);
+	pci_release_region(pdev, 1);
 	free_netdev(ndev);
 	pci_disable_device(pdev);
 }
@@ -1981,9 +1952,30 @@ static struct platform_driver altera_tse_driver = {
 	},
 };
 
+static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
+	{
+		.mac_dev_offset = 0,
+		.rx_dma_csr_offset = 0x840,
+		.rx_dma_desc_offset = 0x860,
+		.rx_dma_resp_offset = 0x880,
+		.tx_dma_csr_offset = 0x800,
+		.tx_dma_desc_offset = 0x820,
+
+		.dmaops = &altera_dtype_msgdma,
+
+		.rx_irq = 0,
+		.tx_irq = 1,
+
+		.rx_fifo_depth = 2048,
+		.tx_fifo_depth = 2048,
+		.hash_filter = 1,
+		.added_unicast = 1,
+		.max_mtu = ETH_DATA_LEN + 2,
+	}
+};
+
 static const struct pci_device_id altera_tse_pci_tbl[] = {
-	{PCI_DEVICE(0x1059, 0xa100)},
-	{PCI_DEVICE(0xa100, 0x1059)},
+	{PCI_DEVICE(0x1059, 0xa100), .driver_data = 0},
 	{0, }
 };
 
@@ -1994,13 +1986,10 @@ static struct pci_driver altera_tse_pci_driver = {
 	.id_table = altera_tse_pci_tbl,
 	.probe    = altera_tse_pci_probe,
 	.remove   = altera_tse_pci_remove,
-#ifdef CONFIG_PM
-	.driver.pm = NULL,
-#endif
 #if 0
-	.shutdown = igb_shutdown,
-	.sriov_configure = igb_pci_sriov_configure,
-	.err_handler = &igb_err_handler
+	.shutdown = NULL,
+	.sriov_configure = NULL,
+	.err_handler = NULL,
 #endif
 };
 

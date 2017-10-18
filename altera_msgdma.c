@@ -143,8 +143,6 @@ u32 msgdma_tx_completions(struct altera_tse_private *priv)
 	/* Get number of sent descriptors */
 	inuse = csrrd32(priv->tx_dma_csr, msgdma_csroffs(rw_fill_level))
 			& 0xffff;
-printk("%s: inuse=%d\n", __FUNCTION__, inuse);
-printk("%s: tx->cons=%d tx->prods=%d\n", __FUNCTION__, priv->tx_cons, priv->tx_prod);
 	if (inuse) { /* Tx FIFO is not empty */
 		ready = priv->tx_prod - priv->tx_cons - inuse - 1;
 	} else {
