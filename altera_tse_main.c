@@ -1359,11 +1359,9 @@ static int tse_shutdown(struct net_device *dev)
 	priv->dmaops->disable_txirq(priv);
 	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 
-#if 0
 	/* Free the IRQ lines */
 	free_irq(priv->rx_irq, dev);
 	free_irq(priv->tx_irq, dev);
-#endif
 
 	/* disable and reset the MAC, empties fifo */
 	spin_lock(&priv->mac_cfg_lock);
@@ -1772,17 +1770,18 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 	/* xSGDMA Tx Dispatcher address space */
 	priv->tx_dma_csr = base + driver_data->tx_dma_csr_offset;
 
-	printk("num int vec=%d\n", pci_alloc_irq_vectors(pdev, 1, 32, PCI_IRQ_MSI | PCI_IRQ_MSIX));
+	if (pci_alloc_irq_vectors(pdev, 1, 32, PCI_IRQ_MSI | PCI_IRQ_MSIX) == 4) {
+		/* Rx IRQ */
+		priv->rx_irq = pci_irq_vector(pdev, driver_data->rx_irq);
 
-	/* Rx IRQ */
-	priv->rx_irq = pci_irq_vector(pdev, driver_data->rx_irq);
+		/* Tx IRQ */
+		priv->tx_irq = pci_irq_vector(pdev, driver_data->tx_irq);
 
-	/* Tx IRQ */
-	priv->tx_irq = pci_irq_vector(pdev, driver_data->tx_irq);
-printk("rx_irq=%d, tx_irq=%d\n", priv->rx_irq, priv->tx_irq);
-#if 0
-	priv->tx_irq = priv->rx_irq = -1;
-#endif
+	} else {
+		/* TODO: fall back to legacy interrupt emulation */
+		priv->rx_irq = -1;
+		priv->tx_irq = -1;
+	}
 
 	/* FIFO depths must match with design */
 	priv->rx_fifo_depth = driver_data->rx_fifo_depth;
@@ -1888,6 +1887,7 @@ static void altera_tse_pci_remove(struct pci_dev *pdev)
 	}
 
 	unregister_netdev(ndev);
+	pci_free_irq_vectors(pdev);
 	pci_set_drvdata(pdev, NULL);
 	pci_iounmap(pdev, priv->mac_dev);
 	pci_release_region(pdev, 1);
