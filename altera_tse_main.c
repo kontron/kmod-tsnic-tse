@@ -1963,8 +1963,8 @@ static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
 
 		.dmaops = &altera_dtype_msgdma,
 
-		.rx_irq = 0,
-		.tx_irq = 1,
+		.rx_irq = 3,
+		.tx_irq = 2,
 
 		.rx_fifo_depth = 2048,
 		.tx_fifo_depth = 2048,
