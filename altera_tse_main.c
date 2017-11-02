@@ -109,6 +109,7 @@ struct altera_tse_kontron_driver_data
 	int tx_dma_csr_offset;
 
 	const struct altera_dmaops *dmaops;
+	int dmamask;
 
 	int rx_irq;
 	int tx_irq;
@@ -1754,7 +1755,7 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 		goto err_free_netdev;
 	}
 
-	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(priv->dmaops->dmamask))) {
+	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(driver_data->dmamask))) {
 		if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))) {
 			dev_err(&pdev->dev, "No usable DMA configuration, aborting\n");
 			goto err_free_netdev;
