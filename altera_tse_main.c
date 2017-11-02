@@ -1776,11 +1776,13 @@ static int altera_tse_pci_probe(struct pci_dev *pdev, const struct pci_device_id
 
 		/* Tx IRQ */
 		priv->tx_irq = pci_irq_vector(pdev, driver_data->tx_irq);
-
 	} else {
 		/* TODO: fall back to legacy interrupt emulation */
+		dev_err(&pdev->dev, "Legacy interrupts not supported...\n");
 		priv->rx_irq = -1;
 		priv->tx_irq = -1;
+
+		goto err_free_netdev;
 	}
 
 	/* FIFO depths must match with design */
