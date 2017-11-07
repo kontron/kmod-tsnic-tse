@@ -1903,6 +1903,206 @@ static void altera_tse_pci_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
+static int altera_tse_platform_probe(struct platform_device *pdev)
+{
+	struct net_device *ndev;
+	int ret = -ENODEV;
+	struct altera_tse_private *priv;
+	struct resource *res;
+	struct resource *region;
+	// TODO:
+	const struct altera_tse_kontron_driver_data *driver_data =
+			&kontron_drv_data[0];
+	void __iomem *base;
+
+	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
+	if (!ndev) {
+		dev_err(&pdev->dev, "Could not allocate network device\n");
+		return -ENODEV;
+	}
+
+	SET_NETDEV_DEV(ndev, &pdev->dev);
+	platform_set_drvdata(pdev, ndev);
+
+	priv = netdev_priv(ndev);
+	priv->device = &pdev->dev;
+	priv->dev = ndev;
+	priv->msg_enable = netif_msg_init(debug, default_msg_level);
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (res == NULL) {
+		dev_err(&pdev->dev, "memory resource not defined\n");
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	region = devm_request_mem_region(&pdev->dev, res->start,
+					 resource_size(res), dev_name(&pdev->dev));
+	if (region == NULL) {
+		dev_err(&pdev->dev, "unable to request region\n");
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	base = devm_ioremap_nocache(&pdev->dev, region->start,
+			resource_size(region));
+	if (base == NULL) {
+		dev_err(&pdev->dev, "ioremap_nocache failed!");
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	/* single supported DMA mode, for now? */
+	priv->dmaops = driver_data->dmaops;
+
+	if (priv->dmaops &&
+			priv->dmaops->altera_dtype == ALTERA_DTYPE_MSGDMA) {
+		priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
+		priv->tx_dma_desc = base + driver_data->tx_dma_desc_offset;
+		priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
+	} else {
+		ret = -ENODEV;
+		goto err_free_netdev;
+	}
+
+	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(driver_data->dmamask))) {
+		if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32))) {
+			dev_err(&pdev->dev, "No usable DMA configuration, aborting\n");
+			goto err_free_netdev;
+		}
+	}
+
+	/* MAC address space */
+	priv->mac_dev = base + driver_data->mac_dev_offset;
+
+	/* xSGDMA Rx Dispatcher address space */
+	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
+
+	/* xSGDMA Tx Dispatcher address space */
+	priv->tx_dma_csr = base + driver_data->tx_dma_csr_offset;
+
+	priv->rx_irq = platform_get_irq(pdev, 0);
+	if (priv->rx_irq < 0) {
+		dev_err(&pdev->dev, "IRQ0 (%d) resource not defined\n", priv->tx_irq);
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	priv->tx_irq = platform_get_irq(pdev, 1);
+	if (priv->tx_irq < 0) {
+		dev_err(&pdev->dev, "IRQ1 (%d) resource not defined\n", priv->tx_irq);
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	/* FIFO depths must match with design */
+	priv->rx_fifo_depth = driver_data->rx_fifo_depth;
+	priv->tx_fifo_depth = driver_data->tx_fifo_depth;
+
+	/* hash filter settings for this instance */
+	priv->hash_filter = driver_data->hash_filter;
+
+	/* Set hash filter to not set for now until the
+	 * multicast filter receive issue is debugged
+	 */
+	priv->hash_filter = 0;
+
+	/* supplemental address settings for this instance must match with design */
+	priv->added_unicast = driver_data->added_unicast;
+
+	/* Max MTU is 1500, ETH_DATA_LEN */
+	priv->max_mtu = driver_data->max_mtu;
+
+	/* The DMA buffer size already accounts for an alignment bias
+	 * to avoid unaligned access exceptions for the host processor,
+	 */
+	priv->rx_dma_buf_sz = ALTERA_RXDMABUFFER_SIZE;
+
+	/* set random MAC address */
+	eth_hw_addr_random(ndev);
+	/* TODO: read MAC address from some EEPROM */
+
+	/* initialize netdev */
+	ndev->mem_start = res->start;
+	ndev->mem_end = res->end;
+
+	ndev->netdev_ops = &altera_tse_netdev_ops;
+	altera_tse_set_ethtool_ops(ndev);
+
+	altera_tse_netdev_ops.ndo_set_rx_mode = tse_set_rx_mode;
+
+	if (priv->hash_filter)
+		altera_tse_netdev_ops.ndo_set_rx_mode =
+				tse_set_rx_mode_hashfilter;
+
+	/* Scatter/gather IO is not supported,
+	 * so it is turned off
+	 */
+	ndev->hw_features &= ~NETIF_F_SG;
+	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
+
+	/* VLAN offloading of tagging, stripping and filtering is not
+	 * supported by hardware, but driver will accommodate the
+	 * extra 4-byte VLAN tag for processing by upper layers
+	 */
+	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX;
+
+	/* setup NAPI interface */
+	netif_napi_add(ndev, &priv->napi, tse_poll, NAPI_POLL_WEIGHT);
+
+	spin_lock_init(&priv->mac_cfg_lock);
+	spin_lock_init(&priv->tx_lock);
+	spin_lock_init(&priv->rxdma_irq_lock);
+
+	netif_carrier_off(ndev);
+	ret = register_netdev(ndev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register TSE net device\n");
+		goto err_register_netdev;
+	}
+
+	priv->revision = ioread32(&priv->mac_dev->megacore_revision);
+
+	if (netif_msg_probe(priv))
+		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
+				(priv->revision >> 8) & 0xff,
+				priv->revision & 0xff,
+				(unsigned long) ndev->mem_start, priv->rx_irq,
+				priv->tx_irq);
+
+	ret = init_phy_direct(ndev);
+	if (ret != 0) {
+		netdev_err(ndev, "Cannot attach to PHY (error: %d)\n", ret);
+		goto err_init_phy;
+	}
+
+	return 0;
+
+err_init_phy:
+	unregister_netdev(ndev);
+err_register_netdev:
+	netif_napi_del(&priv->napi);
+err_free_netdev:
+	free_netdev(ndev);
+error:
+	return ret;
+}
+
+static int altera_tse_platform_remove(struct platform_device *pdev)
+{
+	struct net_device *ndev = platform_get_drvdata(pdev);
+
+	if (ndev->phydev) {
+		phy_disconnect(ndev->phydev);
+	}
+
+	unregister_netdev(ndev);
+	platform_set_drvdata(pdev, NULL);
+	free_netdev(ndev);
+
+	return 0;
+}
+
 static const struct altera_dmaops altera_dtype_sgdma = {
 	.altera_dtype = ALTERA_DTYPE_SGDMA,
 	.dmamask = 32,
@@ -1987,6 +2187,15 @@ static const struct pci_device_id altera_tse_pci_tbl[] = {
 	{0, }
 };
 
+static struct platform_driver altera_tse_platform_driver = {
+    .driver = {
+        .name = "tsnnic-tse",
+    },
+    .probe = altera_tse_platform_probe,
+    .remove = altera_tse_platform_remove,
+};
+
+
 MODULE_DEVICE_TABLE(pci, altera_tse_pci_tbl);
 
 static struct pci_driver altera_tse_pci_driver = {
@@ -2013,6 +2222,10 @@ static int __init altera_tse_init_module(void)
 	}
 #endif
 
+	rv = platform_driver_register(&altera_tse_platform_driver);
+	if (rv)
+		pr_err("Unable to register mfd platform driver: %d\n", rv);
+
 	rv = platform_driver_register(&altera_tse_driver);
 	if (rv)
 		pr_err("Unable to register platform driver: %d\n", rv);
@@ -2029,6 +2242,8 @@ static void altera_tse_exit_module(void)
 	if (probe_pci)
 		pci_unregister_driver(&altera_tse_pci_driver);
 #endif
+
+	platform_driver_unregister(&altera_tse_platform_driver);
 
 	platform_driver_unregister(&altera_tse_driver);
 }
