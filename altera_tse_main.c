@@ -82,6 +82,12 @@ static int mac_loopback = MAC_LOOPBACK;
 module_param(mac_loopback, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mac_loopback, "Enable MAC Loopback");
 
+#ifdef CONFIG_PCI
+#define PROBE_PCI 0
+static int probe_pci = PROBE_PCI;
+module_param(probe_pci, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(probe_pci, "Enable driver probing by PCI");
+#endif
 
 #define POLL_PHY (-1)
 
@@ -2000,9 +2006,11 @@ static int __init altera_tse_init_module(void)
 	int rv;
 
 #ifdef CONFIG_PCI
-	rv = pci_register_driver(&altera_tse_pci_driver);
-	if (rv)
-		pr_err("Unable to register PCI driver: %d\n", rv);
+	if (probe_pci) {
+		rv = pci_register_driver(&altera_tse_pci_driver);
+		if (rv)
+			pr_err("Unable to register PCI driver: %d\n", rv);
+	}
 #endif
 
 	rv = platform_driver_register(&altera_tse_driver);
@@ -2018,7 +2026,8 @@ module_init(altera_tse_init_module);
 static void altera_tse_exit_module(void)
 {
 #ifdef CONFIG_PCI
-	pci_unregister_driver(&altera_tse_pci_driver);
+	if (probe_pci)
+		pci_unregister_driver(&altera_tse_pci_driver);
 #endif
 
 	platform_driver_unregister(&altera_tse_driver);
