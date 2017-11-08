@@ -2189,7 +2189,7 @@ static const struct pci_device_id altera_tse_pci_tbl[] = {
 
 static struct platform_driver altera_tse_platform_driver = {
     .driver = {
-        .name = "tsnnic-tse",
+        .name = "tsnic-tse",
     },
     .probe = altera_tse_platform_probe,
     .remove = altera_tse_platform_remove,
