@@ -1,5 +1,5 @@
 #
-# Makefile for the Altera device drivers.
+# Makefile for the tsnic-tse device drivers.
 #
 
 obj-m += tsnic-tse.o
