@@ -10,7 +10,5 @@ KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 
 all: modules
 
-clean: modules
-
-clean modules:
+clean modules modules_install:
 	$(MAKE) -C $(KERNEL_SRC) M=$$PWD $@
