@@ -490,20 +490,17 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 
 /* Reclaim resources after transmission completes
  */
-static int tse_tx_complete(struct altera_tse_private *priv)
+static int tse_tx_complete(struct altera_tse_private *priv, int budget)
 {
 	unsigned int txsize = priv->tx_ring_size;
 	u32 ready;
 	unsigned int entry;
 	struct tse_buffer *tx_buff;
-	int txcomplete = 0;
-
-	spin_lock(&priv->tx_lock);
 
 	ready = priv->dmaops->tx_completions(priv);
 
 	/* Free sent buffers */
-	while (ready && (priv->tx_cons != priv->tx_prod)) {
+	while (ready && budget && (priv->tx_cons != priv->tx_prod)) {
 		entry = priv->tx_cons % txsize;
 		tx_buff = &priv->tx_ring[entry];
 
@@ -516,24 +513,19 @@ static int tse_tx_complete(struct altera_tse_private *priv)
 
 		tse_free_tx_buffer(priv, tx_buff);
 		priv->tx_cons++;
-
-		txcomplete++;
-		ready--;
+		budget--;
+		ready = priv->dmaops->tx_completions(priv);
 	}
 
 	if (unlikely(netif_queue_stopped(priv->dev) &&
 		     tse_tx_avail(priv) > TSE_TX_THRESH(priv))) {
-		if (netif_queue_stopped(priv->dev) &&
-		    tse_tx_avail(priv) > TSE_TX_THRESH(priv)) {
-			if (netif_msg_tx_done(priv))
-				netdev_dbg(priv->dev, "%s: restart transmit\n",
-					   __func__);
-			netif_wake_queue(priv->dev);
-		}
+		if (netif_msg_tx_done(priv))
+			netdev_dbg(priv->dev, "%s: restart transmit\n",
+				   __func__);
+		netif_wake_queue(priv->dev);
 	}
 
-	spin_unlock(&priv->tx_lock);
-	return txcomplete;
+	return (ready == 0);
 }
 
 /* NAPI polling function
@@ -543,14 +535,17 @@ static int tse_poll(struct napi_struct *napi, int budget)
 	struct altera_tse_private *priv =
 			container_of(napi, struct altera_tse_private, napi);
 	int rxcomplete = 0;
+	int txclean = 0;
+	int work = budget;
 	unsigned long int flags;
-
-	tse_tx_complete(priv);
 
 	rxcomplete = tse_rx(priv, budget);
 
-	if (rxcomplete < budget) {
+	spin_lock_bh(&priv->tx_lock);
+	txclean = tse_tx_complete(priv, budget);
 
+	if (rxcomplete < budget && txclean && (!netif_queue_stopped(priv->dev))) {
+		spin_unlock_bh(&priv->tx_lock);
 		napi_complete_done(napi, rxcomplete);
 
 		netdev_dbg(priv->dev,
@@ -561,8 +556,11 @@ static int tse_poll(struct napi_struct *napi, int budget)
 		priv->dmaops->enable_rxirq(priv);
 		priv->dmaops->enable_txirq(priv);
 		spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+		return 0;
 	}
-	return rxcomplete;
+
+	spin_unlock_bh(&priv->tx_lock);
+	return work;
 }
 
 /* DMA TX & RX FIFO interrupt routing
@@ -655,6 +653,14 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			netdev_dbg(priv->dev, "%s: stop transmitted packets\n",
 				   __func__);
 		netif_stop_queue(dev);
+		if (likely(napi_schedule_prep(&priv->napi))) {
+			unsigned long int flags;
+			spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
+			priv->dmaops->disable_rxirq(priv);
+			priv->dmaops->disable_txirq(priv);
+			spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+			__napi_schedule(&priv->napi);
+		}
 	}
 
 out:
