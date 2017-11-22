@@ -637,6 +637,8 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto out;
 	}
 
+	WARN_ON(dma_addr & 7);
+
 	buffer->skb = skb;
 	buffer->dma_addr = dma_addr;
 	buffer->len = nopaged_len;
