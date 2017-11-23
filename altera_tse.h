@@ -494,6 +494,8 @@ struct altera_tse_private {
 	const struct altera_dmaops *dmaops;
 
 	struct timer_list poll_timer;
+
+	u64 cnt_unaligned_xmit;
 };
 
 /* Function prototypes

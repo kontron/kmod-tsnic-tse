@@ -637,7 +637,8 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto out;
 	}
 
-	WARN_ON(dma_addr & 7);
+	if (dma_addr & 7)
+		priv->cnt_unaligned_xmit++;
 
 	buffer->skb = skb;
 	buffer->dma_addr = dma_addr;
