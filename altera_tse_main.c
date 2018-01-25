@@ -76,6 +76,12 @@ static int mac_loopback = MAC_LOOPBACK;
 module_param(mac_loopback, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mac_loopback, "Enable MAC Loopback");
 
+#define TSN_QUEUE_THRESHOLD TC_PRIO_CONTROL
+static int tsn_queue_threshold = TSN_QUEUE_THRESHOLD;
+module_param(tsn_queue_threshold, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(tsn_queue_threshold, "Set threshold for tsn queue");
+
+
 #define POLL_PHY (-1)
 
 /* Make sure DMA buffer size is larger than the max frame size
@@ -513,7 +519,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	spin_lock_bh(&priv->tx_lock);
 
-	if (skb->priority > TC_PRIO_CONTROL) q = 1;
+	if (skb->priority > tsn_queue_threshold) q = 1;
 
 	if (unlikely(tse_tx_avail(priv, q) < nfrags + 1)) {
 		if (!netif_queue_stopped(dev)) {
