@@ -37,6 +37,7 @@ void msgdma_start_rxdma(struct altera_tse_private *priv)
 void msgdma_reset(struct altera_tse_private *priv)
 {
 	int counter;
+	int q;
 
 	/* Reset Rx mSGDMA */
 	csrwr32(MSGDMA_CSR_STAT_MASK, priv->rx_dma_csr,
@@ -60,26 +61,28 @@ void msgdma_reset(struct altera_tse_private *priv)
 	csrwr32(MSGDMA_CSR_STAT_MASK, priv->rx_dma_csr, msgdma_csroffs(status));
 
 	/* Reset Tx mSGDMA */
-	csrwr32(MSGDMA_CSR_STAT_MASK, priv->tx_dma_csr,
-		msgdma_csroffs(status));
+	for (q = 0; q < priv->num_queues; q++) {
+		csrwr32(MSGDMA_CSR_STAT_MASK, priv->tx_dma_csr[q],
+				msgdma_csroffs(status));
 
-	csrwr32(MSGDMA_CSR_CTL_RESET, priv->tx_dma_csr,
-		msgdma_csroffs(control));
+		csrwr32(MSGDMA_CSR_CTL_RESET, priv->tx_dma_csr[q],
+				msgdma_csroffs(control));
 
-	counter = 0;
-	while (counter++ < ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
-		if (tse_bit_is_clear(priv->tx_dma_csr, msgdma_csroffs(status),
-				     MSGDMA_CSR_STAT_RESETTING))
-			break;
-		udelay(1);
+		counter = 0;
+		while (counter++ < ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
+			if (tse_bit_is_clear(priv->tx_dma_csr[q], msgdma_csroffs(status),
+					MSGDMA_CSR_STAT_RESETTING))
+				break;
+			udelay(1);
+		}
+
+		if (counter >= ALTERA_TSE_SW_RESET_WATCHDOG_CNTR)
+			netif_warn(priv, drv, priv->dev,
+					"TSE Tx mSGDMA resetting bit never cleared!\n");
+
+		/* clear all status bits */
+		csrwr32(MSGDMA_CSR_STAT_MASK, priv->tx_dma_csr[q], msgdma_csroffs(status));
 	}
-
-	if (counter >= ALTERA_TSE_SW_RESET_WATCHDOG_CNTR)
-		netif_warn(priv, drv, priv->dev,
-			   "TSE Tx mSGDMA resetting bit never cleared!\n");
-
-	/* clear all status bits */
-	csrwr32(MSGDMA_CSR_STAT_MASK, priv->tx_dma_csr, msgdma_csroffs(status));
 }
 
 void msgdma_disable_rxirq(struct altera_tse_private *priv)
@@ -94,15 +97,15 @@ void msgdma_enable_rxirq(struct altera_tse_private *priv)
 		    MSGDMA_CSR_CTL_GLOBAL_INTR);
 }
 
-void msgdma_disable_txirq(struct altera_tse_private *priv)
+void msgdma_disable_txirq(struct altera_tse_private *priv, int queue)
 {
-	tse_clear_bit(priv->tx_dma_csr, msgdma_csroffs(control),
+	tse_clear_bit(priv->tx_dma_csr[queue], msgdma_csroffs(control),
 		      MSGDMA_CSR_CTL_GLOBAL_INTR);
 }
 
-void msgdma_enable_txirq(struct altera_tse_private *priv)
+void msgdma_enable_txirq(struct altera_tse_private *priv, int queue)
 {
-	tse_set_bit(priv->tx_dma_csr, msgdma_csroffs(control),
+	tse_set_bit(priv->tx_dma_csr[queue], msgdma_csroffs(control),
 		    MSGDMA_CSR_CTL_GLOBAL_INTR);
 }
 
@@ -111,47 +114,48 @@ void msgdma_clear_rxirq(struct altera_tse_private *priv)
 	csrwr32(MSGDMA_CSR_STAT_IRQ, priv->rx_dma_csr, msgdma_csroffs(status));
 }
 
-void msgdma_clear_txirq(struct altera_tse_private *priv)
+void msgdma_clear_txirq(struct altera_tse_private *priv, int queue)
 {
-	csrwr32(MSGDMA_CSR_STAT_IRQ, priv->tx_dma_csr, msgdma_csroffs(status));
+
+	csrwr32(MSGDMA_CSR_STAT_IRQ, priv->tx_dma_csr[queue], msgdma_csroffs(status));
 }
 
 /* return 0 to indicate transmit is pending */
-int msgdma_tx_buffer(struct altera_tse_private *priv, struct tse_buffer *buffer)
+int msgdma_tx_buffer(struct altera_tse_private *priv, int queue, struct tse_buffer *buffer)
 {
-	csrwr32(lower_32_bits(buffer->dma_addr), priv->tx_dma_desc,
+	csrwr32(lower_32_bits(buffer->dma_addr), priv->tx_dma_desc[queue],
 		msgdma_descroffs(read_addr_lo));
-	csrwr32(upper_32_bits(buffer->dma_addr), priv->tx_dma_desc,
+	csrwr32(upper_32_bits(buffer->dma_addr), priv->tx_dma_desc[queue],
 		msgdma_descroffs(read_addr_hi));
-	csrwr32(0, priv->tx_dma_desc, msgdma_descroffs(write_addr_lo));
-	csrwr32(0, priv->tx_dma_desc, msgdma_descroffs(write_addr_hi));
-	csrwr32(buffer->len, priv->tx_dma_desc, msgdma_descroffs(len));
-	csrwr32(0, priv->tx_dma_desc, msgdma_descroffs(burst_seq_num));
-	csrwr32(MSGDMA_DESC_TX_STRIDE, priv->tx_dma_desc,
+	csrwr32(0, priv->tx_dma_desc[queue], msgdma_descroffs(write_addr_lo));
+	csrwr32(0, priv->tx_dma_desc[queue], msgdma_descroffs(write_addr_hi));
+	csrwr32(buffer->len, priv->tx_dma_desc[queue], msgdma_descroffs(len));
+	csrwr32(0, priv->tx_dma_desc[queue], msgdma_descroffs(burst_seq_num));
+	csrwr32(MSGDMA_DESC_TX_STRIDE, priv->tx_dma_desc[queue],
 		msgdma_descroffs(stride));
-	csrwr32(MSGDMA_DESC_CTL_TX_SINGLE, priv->tx_dma_desc,
+	csrwr32(MSGDMA_DESC_CTL_TX_SINGLE, priv->tx_dma_desc[queue],
 		msgdma_descroffs(control));
 	return 0;
 }
 
-u32 msgdma_tx_completions(struct altera_tse_private *priv)
+u32 msgdma_tx_completions(struct altera_tse_private *priv, int queue)
 {
 	u32 ready = 0;
 	u32 inuse;
 	u32 status;
 
 	/* Get number of sent descriptors */
-	inuse = csrrd32(priv->tx_dma_csr, msgdma_csroffs(rw_fill_level))
+	inuse = csrrd32(priv->tx_dma_csr[queue], msgdma_csroffs(rw_fill_level))
 			& 0xffff;
 	if (inuse) { /* Tx FIFO is not empty */
-		ready = priv->tx_prod - priv->tx_cons - inuse - 1;
+		ready = priv->tx_prod[queue] - priv->tx_cons[queue] - inuse - 1;
 	} else {
 		/* Check for buffered last packet */
-		status = csrrd32(priv->tx_dma_csr, msgdma_csroffs(status));
+		status = csrrd32(priv->tx_dma_csr[queue], msgdma_csroffs(status));
 		if (status & MSGDMA_CSR_STAT_BUSY)
-			ready = priv->tx_prod - priv->tx_cons - 1;
+			ready = priv->tx_prod[queue] - priv->tx_cons[queue] - 1;
 		else
-			ready = priv->tx_prod - priv->tx_cons;
+			ready = priv->tx_prod[queue] - priv->tx_cons[queue];
 	}
 	return ready;
 }

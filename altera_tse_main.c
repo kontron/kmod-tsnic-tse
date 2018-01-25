@@ -95,11 +95,11 @@ MODULE_PARM_DESC(mac_loopback, "Enable MAC Loopback");
 struct altera_tse_kontron_driver_data
 {
 	int rx_dma_resp_offset;
-	int tx_dma_desc_offset;
 	int rx_dma_desc_offset;
 	int mac_dev_offset;
 	int rx_dma_csr_offset;
-	int tx_dma_csr_offset;
+	int tx_dma_desc_offset[2];
+	int tx_dma_csr_offset[2];
 
 	const struct altera_dmaops *dmaops;
 	int dmamask;
@@ -118,9 +118,9 @@ static const struct of_device_id altera_tse_ids[];
 static const struct altera_tse_kontron_driver_data kontron_drv_data[];
 
 
-static inline u32 tse_tx_avail(struct altera_tse_private *priv)
+static inline u32 tse_tx_avail(struct altera_tse_private *priv, int queue)
 {
-	return priv->tx_cons + priv->tx_ring_size - priv->tx_prod - 1;
+	return priv->tx_cons[queue] + priv->tx_ring_size - priv->tx_prod[queue] - 1;
 }
 
 /* PCS Register read/write functions
@@ -215,14 +215,16 @@ static int alloc_init_skbufs(struct altera_tse_private *priv)
 	if (!priv->rx_ring)
 		goto err_rx_ring;
 
-	/* Create Tx ring buffer */
-	priv->tx_ring = kcalloc(tx_descs, sizeof(struct tse_buffer),
+	/* Create Tx ring buffers */
+	for (i = 0; i < priv->num_queues; i++) {
+		priv->tx_ring[i] = kcalloc(tx_descs, sizeof(struct tse_buffer),
 				GFP_KERNEL);
-	if (!priv->tx_ring)
-		goto err_tx_ring;
+		if (!priv->tx_ring[i])
+			goto err_tx_ring;
 
-	priv->tx_cons = 0;
-	priv->tx_prod = 0;
+		priv->tx_cons[i] = 0;
+		priv->tx_prod[i] = 0;
+	}
 
 	/* Init Rx ring */
 	for (i = 0; i < rx_descs; i++) {
@@ -239,7 +241,8 @@ static int alloc_init_skbufs(struct altera_tse_private *priv)
 err_init_rx_buffers:
 	while (--i >= 0)
 		tse_free_rx_buffer(priv, &priv->rx_ring[i]);
-	kfree(priv->tx_ring);
+	for (i = 0; i < priv->num_queues; i++)
+		kfree(priv->tx_ring[i]);
 err_tx_ring:
 	kfree(priv->rx_ring);
 err_rx_ring:
@@ -251,16 +254,17 @@ static void free_skbufs(struct net_device *dev)
 	struct altera_tse_private *priv = netdev_priv(dev);
 	unsigned int rx_descs = priv->rx_ring_size;
 	unsigned int tx_descs = priv->tx_ring_size;
-	int i;
+	int i, q;
 
 	/* Release the DMA TX/RX socket buffers */
 	for (i = 0; i < rx_descs; i++)
 		tse_free_rx_buffer(priv, &priv->rx_ring[i]);
-	for (i = 0; i < tx_descs; i++)
-		tse_free_tx_buffer(priv, &priv->tx_ring[i]);
+	for (q = 0; q < priv->num_queues; q++) {
+		for (i = 0; i < tx_descs; i++)
+			tse_free_tx_buffer(priv, &priv->tx_ring[q][i]);
 
-
-	kfree(priv->tx_ring);
+		kfree(priv->tx_ring[q]);
+	}
 }
 
 /* Reallocate the skb for the reception process
@@ -376,35 +380,36 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 
 /* Reclaim resources after transmission completes
  */
-static int tse_tx_complete(struct altera_tse_private *priv, int budget)
+static int tse_tx_complete(struct altera_tse_private *priv, int q, int budget)
 {
 	unsigned int txsize = priv->tx_ring_size;
 	u32 ready;
 	unsigned int entry;
 	struct tse_buffer *tx_buff;
 
-	ready = priv->dmaops->tx_completions(priv);
+	ready = priv->dmaops->tx_completions(priv, q);
 
 	/* Free sent buffers */
-	while (ready && budget && (priv->tx_cons != priv->tx_prod)) {
-		entry = priv->tx_cons % txsize;
-		tx_buff = &priv->tx_ring[entry];
+	while (ready && budget && (priv->tx_cons[q] != priv->tx_prod[q])) {
+		entry = priv->tx_cons[q] % txsize;
+		tx_buff = &priv->tx_ring[q][entry];
 
 		if (netif_msg_tx_done(priv))
 			netdev_dbg(priv->dev, "%s: curr %d, dirty %d\n",
-				   __func__, priv->tx_prod, priv->tx_cons);
+				   __func__, priv->tx_prod[0], priv->tx_cons[0]);
 
 		if (likely(tx_buff->skb))
 			priv->dev->stats.tx_packets++;
 
 		tse_free_tx_buffer(priv, tx_buff);
-		priv->tx_cons++;
+		priv->tx_cons[q]++;
 		budget--;
-		ready = priv->dmaops->tx_completions(priv);
+		ready = priv->dmaops->tx_completions(priv, q);
 	}
 
 	if (unlikely(netif_queue_stopped(priv->dev) &&
-		     tse_tx_avail(priv) > TSE_TX_THRESH(priv))) {
+		     tse_tx_avail(priv, 0) > TSE_TX_THRESH(priv) &&
+			 tse_tx_avail(priv, 1) > TSE_TX_THRESH(priv))) {
 		if (netif_msg_tx_done(priv))
 			netdev_dbg(priv->dev, "%s: restart transmit\n",
 				   __func__);
@@ -424,11 +429,13 @@ static int tse_poll(struct napi_struct *napi, int budget)
 	int txclean = 0;
 	int work = budget;
 	unsigned long int flags;
+	int q;
 
 	rxcomplete = tse_rx(priv, budget);
 
 	spin_lock_bh(&priv->tx_lock);
-	txclean = tse_tx_complete(priv, budget);
+	for (q = 0; q < priv->num_queues; q++)
+		txclean |= tse_tx_complete(priv, q, budget);
 
 	if (rxcomplete < budget && txclean && (!netif_queue_stopped(priv->dev))) {
 		spin_unlock_bh(&priv->tx_lock);
@@ -440,7 +447,8 @@ static int tse_poll(struct napi_struct *napi, int budget)
 
 		spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
 		priv->dmaops->enable_rxirq(priv);
-		priv->dmaops->enable_txirq(priv);
+		for (q = 0; q < priv->num_queues; q++)
+			priv->dmaops->enable_txirq(priv, q);
 		spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 		return 0;
 	}
@@ -455,6 +463,7 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct altera_tse_private *priv;
+	int q;
 
 	if (unlikely(!dev)) {
 		pr_err("%s: invalid dev pointer\n", __func__);
@@ -465,13 +474,16 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 	spin_lock(&priv->rxdma_irq_lock);
 	/* reset IRQs */
 	priv->dmaops->clear_rxirq(priv);
-	priv->dmaops->clear_txirq(priv);
+	for (q = 0; q < priv->num_queues; q++) {
+		priv->dmaops->clear_txirq(priv, q);
+	}
 	spin_unlock(&priv->rxdma_irq_lock);
 
 	if (likely(napi_schedule_prep(&priv->napi))) {
 		spin_lock(&priv->rxdma_irq_lock);
 		priv->dmaops->disable_rxirq(priv);
-		priv->dmaops->disable_txirq(priv);
+		for (q = 0; q < priv->num_queues; q++)
+			priv->dmaops->disable_txirq(priv, q);
 		spin_unlock(&priv->rxdma_irq_lock);
 		__napi_schedule(&priv->napi);
 	}
@@ -497,10 +509,13 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned int nopaged_len = skb_headlen(skb);
 	enum netdev_tx ret = NETDEV_TX_OK;
 	dma_addr_t dma_addr;
+	int q = 0;
 
 	spin_lock_bh(&priv->tx_lock);
 
-	if (unlikely(tse_tx_avail(priv) < nfrags + 1)) {
+	if (skb->priority > TC_PRIO_CONTROL) q = 1;
+
+	if (unlikely(tse_tx_avail(priv, q) < nfrags + 1)) {
 		if (!netif_queue_stopped(dev)) {
 			netif_stop_queue(dev);
 			/* This is a hard error, log it. */
@@ -512,8 +527,8 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto out;
 	}
 	/* Map the first skb fragment */
-	entry = priv->tx_prod % txsize;
-	buffer = &priv->tx_ring[entry];
+	entry = priv->tx_prod[q] % txsize;
+	buffer = &priv->tx_ring[q][entry];
 
 	dma_addr = dma_map_single(priv->device, skb->data, nopaged_len,
 				  DMA_TO_DEVICE);
@@ -530,23 +545,25 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	buffer->dma_addr = dma_addr;
 	buffer->len = nopaged_len;
 
-	priv->dmaops->tx_buffer(priv, buffer);
+	priv->dmaops->tx_buffer(priv, q, buffer);
 
 	skb_tx_timestamp(skb);
 
-	priv->tx_prod++;
+	priv->tx_prod[q]++;
 	dev->stats.tx_bytes += skb->len;
 
-	if (unlikely(tse_tx_avail(priv) <= TXQUEUESTOP_THRESHHOLD)) {
+	if (unlikely(tse_tx_avail(priv, q) <= TXQUEUESTOP_THRESHHOLD)) {
 		if (netif_msg_hw(priv))
 			netdev_dbg(priv->dev, "%s: stop transmitted packets\n",
 				   __func__);
 		netif_stop_queue(dev);
 		if (likely(napi_schedule_prep(&priv->napi))) {
 			unsigned long int flags;
+			int i;
 			spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
 			priv->dmaops->disable_rxirq(priv);
-			priv->dmaops->disable_txirq(priv);
+			for (i = 0; i  < priv->num_queues; i++)
+				priv->dmaops->disable_txirq(priv, i);
 			spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 			__napi_schedule(&priv->napi);
 		}
@@ -1049,7 +1066,8 @@ static int tse_open(struct net_device *dev)
 	/* Enable DMA interrupts */
 	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
 	priv->dmaops->enable_rxirq(priv);
-	priv->dmaops->enable_txirq(priv);
+	for (i = 0; i < priv->num_queues; i++)
+		priv->dmaops->enable_txirq(priv, i);
 
 	/* Setup RX descriptor chain */
 	for (i = 0; i < priv->rx_ring_size; i++)
@@ -1088,6 +1106,7 @@ static int tse_shutdown(struct net_device *dev)
 	struct altera_tse_private *priv = netdev_priv(dev);
 	int ret;
 	unsigned long int flags;
+	int q;
 
 	/* Stop the PHY */
 	if (dev->phydev)
@@ -1099,7 +1118,8 @@ static int tse_shutdown(struct net_device *dev)
 	/* Disable DMA interrupts */
 	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
 	priv->dmaops->disable_rxirq(priv);
-	priv->dmaops->disable_txirq(priv);
+	for (q = 0; q < priv->num_queues; q++)
+		priv->dmaops->disable_txirq(priv, q);
 	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 
 	/* Free the IRQ lines */
@@ -1145,10 +1165,10 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	struct altera_tse_private *priv;
 	struct resource *res;
 	struct resource *region;
-	// TODO:
 	const struct altera_tse_kontron_driver_data *driver_data =
 			&kontron_drv_data[0];
 	void __iomem *base;
+	int i;
 
 	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
 	if (!ndev) {
@@ -1191,13 +1211,23 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	priv->dmaops = driver_data->dmaops;
 
 	if (priv->dmaops &&
-			priv->dmaops->altera_dtype == ALTERA_DTYPE_MSGDMA) {
-		priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
-		priv->tx_dma_desc = base + driver_data->tx_dma_desc_offset;
-		priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
-	} else {
+			priv->dmaops->altera_dtype != ALTERA_DTYPE_MSGDMA) {
 		ret = -ENODEV;
 		goto err_free_netdev;
+	}
+
+	/* MAC address space */
+	priv->mac_dev = base + driver_data->mac_dev_offset;
+	/* xSGDMA Rx Dispatcher, CSR and response buffer address spaces */
+	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
+	priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
+	priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
+
+	priv->num_queues = 2;
+	/* xSGDMA Tx Dispatcher address space */
+	for (i = 0; i < priv->num_queues; i++) {
+		priv->tx_dma_csr[i] = base + driver_data->tx_dma_csr_offset[i];
+		priv->tx_dma_desc[i] = base + driver_data->tx_dma_desc_offset[i];
 	}
 
 	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(driver_data->dmamask))) {
@@ -1206,15 +1236,6 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 			goto err_free_netdev;
 		}
 	}
-
-	/* MAC address space */
-	priv->mac_dev = base + driver_data->mac_dev_offset;
-
-	/* xSGDMA Rx Dispatcher address space */
-	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
-
-	/* xSGDMA Tx Dispatcher address space */
-	priv->tx_dma_csr = base + driver_data->tx_dma_csr_offset;
 
 	priv->rx_irq = platform_get_irq(pdev, 0);
 	if (priv->rx_irq < 0) {
@@ -1363,8 +1384,8 @@ static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
 		.rx_dma_csr_offset = 0x840,
 		.rx_dma_desc_offset = 0x860,
 		.rx_dma_resp_offset = 0x880,
-		.tx_dma_csr_offset = 0x800,
-		.tx_dma_desc_offset = 0x820,
+		.tx_dma_csr_offset = {0x800, 0x900},
+		.tx_dma_desc_offset = {0x820, 0x920},
 
 		.dmaops = &altera_dtype_msgdma,
 

@@ -397,14 +397,14 @@ struct altera_dmaops {
 	int altera_dtype;
 	int dmamask;
 	void (*reset_dma)(struct altera_tse_private *);
-	void (*enable_txirq)(struct altera_tse_private *);
+	void (*enable_txirq)(struct altera_tse_private *, int queue);
 	void (*enable_rxirq)(struct altera_tse_private *);
-	void (*disable_txirq)(struct altera_tse_private *);
+	void (*disable_txirq)(struct altera_tse_private *, int queue);
 	void (*disable_rxirq)(struct altera_tse_private *);
-	void (*clear_txirq)(struct altera_tse_private *);
+	void (*clear_txirq)(struct altera_tse_private *, int queue);
 	void (*clear_rxirq)(struct altera_tse_private *);
-	int (*tx_buffer)(struct altera_tse_private *, struct tse_buffer *);
-	u32 (*tx_completions)(struct altera_tse_private *);
+	int (*tx_buffer)(struct altera_tse_private *, int q, struct tse_buffer *);
+	u32 (*tx_completions)(struct altera_tse_private *, int queue);
 	void (*add_rx_desc)(struct altera_tse_private *, struct tse_buffer *);
 	u32 (*get_rx_status)(struct altera_tse_private *);
 	int (*init_dma)(struct altera_tse_private *);
@@ -431,8 +431,8 @@ struct altera_tse_private {
 	void __iomem *rx_dma_resp;
 
 	/* mSGDMA Tx Dispatcher address space */
-	void __iomem *tx_dma_csr;
-	void __iomem *tx_dma_desc;
+	void __iomem *tx_dma_csr[2];
+	void __iomem *tx_dma_desc[2];
 
 	/* Rx buffers queue */
 	struct tse_buffer *rx_ring;
@@ -442,9 +442,10 @@ struct altera_tse_private {
 	u32 rx_dma_buf_sz;
 
 	/* Tx ring buffer */
-	struct tse_buffer *tx_ring;
-	u32 tx_prod;
-	u32 tx_cons;
+	int num_queues;
+	struct tse_buffer *tx_ring[2];
+	u32 tx_prod[2];
+	u32 tx_cons[2];
 	u32 tx_ring_size;
 
 	/* Interrupts */
