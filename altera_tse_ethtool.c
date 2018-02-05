@@ -70,6 +70,8 @@ static char const stat_gstrings[][ETH_GSTRING_LEN] = {
 	"rx_jabbers",
 	"rx_runts",
 	"tx_unaligned",
+	"tx_queue_0",
+	"tx_queue_1",
 };
 
 static void tse_get_drvinfo(struct net_device *dev,
@@ -181,6 +183,8 @@ static void tse_fill_stats(struct net_device *dev, struct ethtool_stats *dummy,
 	buf[30] = csrrd32(priv->mac_dev,
 			  tse_csroffs(ether_stats_fragments));
 	buf[31] = priv->cnt_unaligned_xmit;
+	buf[32] = priv->cnt_queue_xmit[0];
+	if (priv->num_queues > 1) buf[33] = priv->cnt_queue_xmit[1];
 }
 
 static int tse_sset_count(struct net_device *dev, int sset)

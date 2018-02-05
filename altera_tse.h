@@ -497,6 +497,7 @@ struct altera_tse_private {
 	struct timer_list poll_timer;
 
 	u64 cnt_unaligned_xmit;
+	u64 *cnt_queue_xmit;
 };
 
 /* Function prototypes

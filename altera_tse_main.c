@@ -557,6 +557,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	priv->tx_prod[q]++;
 	dev->stats.tx_bytes += skb->len;
+	priv->cnt_queue_xmit[q]++;
 
 	if (unlikely(tse_tx_avail(priv, q) <= TXQUEUESTOP_THRESHHOLD)) {
 		if (netif_msg_hw(priv))
@@ -1230,6 +1231,11 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
 
 	priv->num_queues = 2;
+
+	/* setup per queue xmit counter */
+	priv->cnt_queue_xmit = kzalloc(priv->num_queues* sizeof(*priv->cnt_queue_xmit),
+			GFP_KERNEL);
+
 	/* xSGDMA Tx Dispatcher address space */
 	for (i = 0; i < priv->num_queues; i++) {
 		priv->tx_dma_csr[i] = base + driver_data->tx_dma_csr_offset[i];
