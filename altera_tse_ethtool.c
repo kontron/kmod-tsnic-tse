@@ -34,7 +34,7 @@
 
 #include "altera_tse.h"
 
-#define TSE_STATS_LEN	32
+#define TSE_STATS_LEN	34
 #define TSE_NUM_REGS	128
 
 static char const stat_gstrings[][ETH_GSTRING_LEN] = {
