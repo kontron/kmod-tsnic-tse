@@ -184,7 +184,7 @@ static void tse_fill_stats(struct net_device *dev, struct ethtool_stats *dummy,
 			  tse_csroffs(ether_stats_fragments));
 	buf[31] = priv->cnt_unaligned_xmit;
 	buf[32] = priv->cnt_queue_xmit[0];
-	if (priv->num_queues > 1) buf[33] = priv->cnt_queue_xmit[1];
+	buf[33] = priv->cnt_queue_xmit[1];
 }
 
 static int tse_sset_count(struct net_device *dev, int sset)
