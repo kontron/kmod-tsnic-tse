@@ -530,6 +530,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 				   __func__);
 		}
 		ret = NETDEV_TX_BUSY;
+		dev->stats.tx_fifo_errors++;
 		goto out;
 	}
 	/* Map the first skb fragment */
