@@ -410,6 +410,15 @@ struct altera_dmaops {
 	int (*init_dma)(struct altera_tse_private *);
 	void (*uninit_dma)(struct altera_tse_private *);
 	void (*start_rxdma)(struct altera_tse_private *);
+	u16 (*get_rsp_level)(struct altera_tse_private *);
+};
+
+
+struct altera_tse_q_vector {
+	spinlock_t tx_lock __attribute__ ((aligned (SMP_CACHE_BYTES)));
+	struct	napi_struct napi;
+	struct altera_tse_private *priv;
+	int queue;
 };
 
 /* This structure is private to each device.
@@ -440,6 +449,8 @@ struct altera_tse_private {
 	u32 rx_prod;
 	u32 rx_ring_size;
 	u32 rx_dma_buf_sz;
+
+	struct altera_tse_q_vector q_vector[2];
 
 	/* Tx ring buffer */
 	int num_queues;
@@ -475,11 +486,13 @@ struct altera_tse_private {
 	struct list_head rxlisthd;
 
 	/* MAC command_config register protection */
-	spinlock_t mac_cfg_lock;
+	spinlock_t mac_cfg_lock __attribute__ ((aligned (SMP_CACHE_BYTES)));
 	/* Tx path protection */
-	spinlock_t tx_lock;
+	// spinlock_t tx_lock;
 	/* Rx DMA & interrupt control protection */
-	spinlock_t rxdma_irq_lock;
+	spinlock_t rxdma_irq_lock __attribute__ ((aligned (SMP_CACHE_BYTES)));
+	/* Tx DMA & interrupt control protection */
+	spinlock_t txdma_irq_lock __attribute__ ((aligned (SMP_CACHE_BYTES)));
 
 	/* PHY */
 	int phy_addr;		/* PHY's MDIO address, -1 for autodetection */

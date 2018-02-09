@@ -31,5 +31,6 @@ u32 msgdma_rx_status(struct altera_tse_private *);
 int msgdma_initialize(struct altera_tse_private *);
 void msgdma_uninitialize(struct altera_tse_private *);
 void msgdma_start_rxdma(struct altera_tse_private *);
+u16 msgdma_get_rsp_level(struct altera_tse_private *priv);
 
 #endif /*  __ALTERA_MSGDMA_H__ */

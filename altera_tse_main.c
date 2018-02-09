@@ -413,59 +413,108 @@ static int tse_tx_complete(struct altera_tse_private *priv, int q, int budget)
 		ready = priv->dmaops->tx_completions(priv, q);
 	}
 
-	if (unlikely(netif_queue_stopped(priv->dev) &&
-		     tse_tx_avail(priv, 0) > TSE_TX_THRESH(priv) &&
-			 tse_tx_avail(priv, 1) > TSE_TX_THRESH(priv))) {
+	if (unlikely(netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q)) &&
+		     tse_tx_avail(priv, q) > TSE_TX_THRESH(priv))) {
 		if (netif_msg_tx_done(priv))
-			netdev_dbg(priv->dev, "%s: restart transmit\n",
-				   __func__);
-		netif_wake_queue(priv->dev);
+			netdev_dbg(priv->dev, "%s: Queue %d restart transmit\n",
+				   __func__, q);
+		netif_wake_subqueue(priv->dev, q);
 	}
 
 	return (ready == 0);
 }
 
-/* NAPI polling function
+/* TX NAPI polling function
+ */
+static int tse_poll_tx(struct napi_struct *napi, int budget)
+{
+	struct altera_tse_q_vector *q_vector =
+			container_of(napi, struct altera_tse_q_vector, napi);
+	struct altera_tse_private *priv = q_vector->priv;
+	int txclean = 0;
+	int work = budget;
+	unsigned long int flags;
+	int q = q_vector->queue;
+
+	spin_lock(&q_vector->tx_lock);
+	txclean = tse_tx_complete(priv, q, budget);
+
+	if (txclean && !netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q))) {
+		spin_unlock(&q_vector->tx_lock);
+		napi_complete(napi);
+
+		netdev_dbg(priv->dev,
+			   "TX[%d] NAPI Complete, %s with budget %d\n",
+			   q, txclean ? "clean" : "dirty", budget);
+
+		spin_lock_irqsave(&priv->txdma_irq_lock, flags);
+		priv->dmaops->clear_txirq(priv, q);
+		priv->dmaops->enable_txirq(priv, q);
+		spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
+
+		return 0;
+	}
+
+	spin_unlock(&q_vector->tx_lock);
+	return work;
+}
+
+/* RX NAPI polling function
  */
 static int tse_poll(struct napi_struct *napi, int budget)
 {
 	struct altera_tse_private *priv =
 			container_of(napi, struct altera_tse_private, napi);
-	int rxcomplete = 0;
-	int txclean = 0;
+	const struct altera_dmaops *dmaops = priv->dmaops;
+	int work_done = 0;
 	int work = budget;
 	unsigned long int flags;
-	int q;
 
-	rxcomplete = tse_rx(priv, budget);
+	work_done = tse_rx(priv, budget);
 
-	spin_lock_bh(&priv->tx_lock);
-	for (q = 0; q < priv->num_queues; q++)
-		txclean |= tse_tx_complete(priv, q, budget);
-
-	if (rxcomplete < budget && txclean && (!netif_queue_stopped(priv->dev))) {
-		spin_unlock_bh(&priv->tx_lock);
-		napi_complete_done(napi, rxcomplete);
+	if (work_done < budget && (dmaops->get_rsp_level(priv) == 0)) {
+		napi_complete_done(napi, work_done);
 
 		netdev_dbg(priv->dev,
 			   "NAPI Complete, did %d packets with budget %d\n",
-			   rxcomplete, budget);
+			   work_done, budget);
 
 		spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-		priv->dmaops->enable_rxirq(priv);
-		for (q = 0; q < priv->num_queues; q++)
-			priv->dmaops->enable_txirq(priv, q);
+		dmaops->clear_rxirq(priv);
+		dmaops->enable_rxirq(priv);
 		spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
 		return 0;
 	}
 
-	spin_unlock_bh(&priv->tx_lock);
 	return work;
 }
 
-/* DMA TX & RX FIFO interrupt routing
+/* DMA RX FIFO interrupt routing
  */
 static irqreturn_t altera_isr(int irq, void *dev_id)
+{
+	struct net_device *dev = dev_id;
+	struct altera_tse_private *priv;
+
+	if (unlikely(!dev)) {
+		pr_err("%s: invalid dev pointer\n", __func__);
+		return IRQ_NONE;
+	}
+	priv = netdev_priv(dev);
+
+	if (likely(napi_schedule_prep(&priv->napi))) {
+		spin_lock(&priv->rxdma_irq_lock);
+		priv->dmaops->disable_rxirq(priv);
+		spin_unlock(&priv->rxdma_irq_lock);
+		__napi_schedule(&priv->napi);
+	}
+
+	return IRQ_HANDLED;
+}
+
+/* DMA TX FIFO interrupt routing
+ */
+static irqreturn_t altera_isr_tx(int irq, void *dev_id)
 {
 	struct net_device *dev = dev_id;
 	struct altera_tse_private *priv;
@@ -475,27 +524,31 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 		pr_err("%s: invalid dev pointer\n", __func__);
 		return IRQ_NONE;
 	}
+
 	priv = netdev_priv(dev);
 
-	spin_lock(&priv->rxdma_irq_lock);
-	/* reset IRQs */
-	priv->dmaops->clear_rxirq(priv);
+	/* reset TX IRQs */
 	for (q = 0; q < priv->num_queues; q++) {
-		priv->dmaops->clear_txirq(priv, q);
-	}
-	spin_unlock(&priv->rxdma_irq_lock);
-
-	if (likely(napi_schedule_prep(&priv->napi))) {
-		spin_lock(&priv->rxdma_irq_lock);
-		priv->dmaops->disable_rxirq(priv);
-		for (q = 0; q < priv->num_queues; q++)
+		if (likely(napi_schedule_prep(&priv->q_vector[q].napi))) {
+			spin_lock(&priv->txdma_irq_lock);
 			priv->dmaops->disable_txirq(priv, q);
-		spin_unlock(&priv->rxdma_irq_lock);
-		__napi_schedule(&priv->napi);
+			spin_unlock(&priv->txdma_irq_lock);
+			__napi_schedule(&priv->q_vector[q].napi);
+		}
 	}
-
 
 	return IRQ_HANDLED;
+}
+
+static inline int tse_tx_queue_mapping(struct altera_tse_private *priv,
+						    struct sk_buff *skb)
+{
+	int q = skb->queue_mapping;
+
+	if (q >= priv->num_queues)
+		q = q % priv->num_queues;
+
+	return q;
 }
 
 /* Transmit a packet (called by the kernel). Dispatches
@@ -517,13 +570,13 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	dma_addr_t dma_addr;
 	int q = 0;
 
-	spin_lock_bh(&priv->tx_lock);
+	q = tse_tx_queue_mapping(priv, skb);
 
-	if (skb->priority > tsn_queue_threshold) q = 1;
+	spin_lock(&priv->q_vector[q].tx_lock);
 
 	if (unlikely(tse_tx_avail(priv, q) < nfrags + 1)) {
-		if (!netif_queue_stopped(dev)) {
-			netif_stop_queue(dev);
+		if (!netif_subqueue_stopped(dev, skb)) {
+			netif_stop_subqueue(dev, q);
 			/* This is a hard error, log it. */
 			netdev_err(priv->dev,
 				   "%s: Tx list full when queue awake\n",
@@ -533,6 +586,7 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		dev->stats.tx_fifo_errors++;
 		goto out;
 	}
+
 	/* Map the first skb fragment */
 	entry = priv->tx_prod[q] % txsize;
 	buffer = &priv->tx_ring[q][entry];
@@ -564,21 +618,18 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (netif_msg_hw(priv))
 			netdev_dbg(priv->dev, "%s: stop transmitted packets\n",
 				   __func__);
-		netif_stop_queue(dev);
-		if (likely(napi_schedule_prep(&priv->napi))) {
+		netif_stop_subqueue(dev, q);
+		if (likely(napi_schedule_prep(&priv->q_vector[q].napi))) {
 			unsigned long int flags;
-			int i;
-			spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-			priv->dmaops->disable_rxirq(priv);
-			for (i = 0; i  < priv->num_queues; i++)
-				priv->dmaops->disable_txirq(priv, i);
-			spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
-			__napi_schedule(&priv->napi);
+			spin_lock_irqsave(&priv->txdma_irq_lock, flags);
+			priv->dmaops->disable_txirq(priv, q);
+			spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
+			__napi_schedule(&priv->q_vector[q].napi);
 		}
 	}
 
 out:
-	spin_unlock_bh(&priv->tx_lock);
+	spin_unlock(&priv->q_vector[q].tx_lock);
 
 	return ret;
 }
@@ -934,6 +985,17 @@ static void tse_set_rx_mode(struct net_device *dev)
 	spin_unlock(&priv->mac_cfg_lock);
 }
 
+u16 tse_select_queue(struct net_device *dev, struct sk_buff *skb,
+		       void *accel_priv, select_queue_fallback_t fallback)
+{
+	struct altera_tse_private *priv = netdev_priv(dev);
+
+	if (priv->num_queues > 1)
+		if (skb->priority > TSN_QUEUE_THRESHOLD)
+			return 1;
+	return 0;
+}
+
 /* Initialise (if necessary) the SGMII PCS component
  */
 static int init_sgmii_pcs(struct net_device *dev)
@@ -1053,6 +1115,36 @@ static int tse_open(struct net_device *dev)
 		goto alloc_skbuf_error;
 	}
 
+	/* Enable DMA interrupts */
+	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
+	priv->dmaops->enable_rxirq(priv);
+	/* Setup RX descriptor chain */
+	for (i = 0; i < priv->rx_ring_size; i++)
+		priv->dmaops->add_rx_desc(priv, &priv->rx_ring[i]);
+	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+
+	spin_lock_irqsave(&priv->txdma_irq_lock, flags);
+	for (i = 0; i < priv->num_queues; i++)
+		priv->dmaops->enable_txirq(priv, i);
+	spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
+
+	if (dev->phydev)
+		phy_start(dev->phydev);
+
+	napi_enable(&priv->napi);
+	for (i = 0; i < priv->num_queues; i++) {
+		napi_enable(&priv->q_vector[i].napi);
+	}
+
+	netif_tx_start_all_queues(dev);
+
+	priv->dmaops->start_rxdma(priv);
+
+	/* Start MAC Rx/Tx */
+	spin_lock(&priv->mac_cfg_lock);
+	tse_set_mac(priv, true);
+	spin_unlock(&priv->mac_cfg_lock);
+
 	/* Register RX interrupt */
 	ret = request_irq(priv->rx_irq, altera_isr, IRQF_SHARED,
 			  dev->name, dev);
@@ -1063,38 +1155,13 @@ static int tse_open(struct net_device *dev)
 	}
 
 	/* Register TX interrupt */
-	ret = request_irq(priv->tx_irq, altera_isr, IRQF_SHARED,
+	ret = request_irq(priv->tx_irq, altera_isr_tx, IRQF_SHARED,
 			  dev->name, dev);
 	if (ret) {
 		netdev_err(dev, "Unable to register TX interrupt %d\n",
 			   priv->tx_irq);
 		goto tx_request_irq_error;
 	}
-
-	/* Enable DMA interrupts */
-	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-	priv->dmaops->enable_rxirq(priv);
-	for (i = 0; i < priv->num_queues; i++)
-		priv->dmaops->enable_txirq(priv, i);
-
-	/* Setup RX descriptor chain */
-	for (i = 0; i < priv->rx_ring_size; i++)
-		priv->dmaops->add_rx_desc(priv, &priv->rx_ring[i]);
-
-	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
-
-	if (dev->phydev)
-		phy_start(dev->phydev);
-
-	napi_enable(&priv->napi);
-	netif_start_queue(dev);
-
-	priv->dmaops->start_rxdma(priv);
-
-	/* Start MAC Rx/Tx */
-	spin_lock(&priv->mac_cfg_lock);
-	tse_set_mac(priv, true);
-	spin_unlock(&priv->mac_cfg_lock);
 
 	return 0;
 
@@ -1120,15 +1187,22 @@ static int tse_shutdown(struct net_device *dev)
 	if (dev->phydev)
 		phy_stop(dev->phydev);
 
-	netif_stop_queue(dev);
+	netif_tx_stop_all_queues(dev);
 	napi_disable(&priv->napi);
+	for (q = 0; q < priv->num_queues; q++)
+		napi_disable(&priv->q_vector[q].napi);
 
-	/* Disable DMA interrupts */
+	/* Disable RX DMA interrupt */
 	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
 	priv->dmaops->disable_rxirq(priv);
+	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+
+	/* Disable TX DMA interrupt */
+	spin_lock_irqsave(&priv->txdma_irq_lock, flags);
 	for (q = 0; q < priv->num_queues; q++)
 		priv->dmaops->disable_txirq(priv, q);
-	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
+	spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
+
 
 	/* Free the IRQ lines */
 	free_irq(priv->rx_irq, dev);
@@ -1136,7 +1210,8 @@ static int tse_shutdown(struct net_device *dev)
 
 	/* disable and reset the MAC, empties fifo */
 	spin_lock(&priv->mac_cfg_lock);
-	spin_lock(&priv->tx_lock);
+	for (q = 0; q < priv->num_queues; q++)
+		spin_lock(&priv->q_vector[q].tx_lock);
 
 	ret = reset_mac(priv);
 	/* Note that reset_mac will fail if the clocks are gated by the PHY
@@ -1148,11 +1223,11 @@ static int tse_shutdown(struct net_device *dev)
 	priv->dmaops->reset_dma(priv);
 	free_skbufs(dev);
 
-	spin_unlock(&priv->tx_lock);
+	for (q = 0; q < priv->num_queues; q++)
+		spin_unlock(&priv->q_vector[q].tx_lock);
 	spin_unlock(&priv->mac_cfg_lock);
 
 	priv->dmaops->uninit_dma(priv);
-
 	return 0;
 }
 
@@ -1164,6 +1239,7 @@ static struct net_device_ops altera_tse_netdev_ops = {
 	.ndo_set_rx_mode	= tse_set_rx_mode,
 	.ndo_change_mtu		= tse_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_select_queue	= tse_select_queue,
 };
 
 static int altera_tse_platform_probe(struct platform_device *pdev)
@@ -1178,7 +1254,7 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	void __iomem *base;
 	int i;
 
-	ndev = alloc_etherdev(sizeof(struct altera_tse_private));
+	ndev = alloc_etherdev_mqs(sizeof(struct altera_tse_private), 2, 1);
 	if (!ndev) {
 		dev_err(&pdev->dev, "Could not allocate network device\n");
 		return -ENODEV;
@@ -1318,10 +1394,16 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 
 	/* setup NAPI interface */
 	netif_napi_add(ndev, &priv->napi, tse_poll, NAPI_POLL_WEIGHT);
+	for (i = 0; i < priv->num_queues; i++) {
+		netif_tx_napi_add(ndev, &priv->q_vector[i].napi, tse_poll_tx, 64);
+		spin_lock_init(&priv->q_vector[i].tx_lock);
+		priv->q_vector[i].queue = i;
+		priv->q_vector[i].priv = priv;
+	}
 
 	spin_lock_init(&priv->mac_cfg_lock);
-	spin_lock_init(&priv->tx_lock);
 	spin_lock_init(&priv->rxdma_irq_lock);
+	spin_lock_init(&priv->txdma_irq_lock);
 
 	netif_carrier_off(ndev);
 	ret = register_netdev(ndev);
@@ -1389,6 +1471,7 @@ static const struct altera_dmaops altera_dtype_msgdma = {
 	.init_dma = msgdma_initialize,
 	.uninit_dma = msgdma_uninitialize,
 	.start_rxdma = msgdma_start_rxdma,
+	.get_rsp_level = msgdma_get_rsp_level,
 };
 
 static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
