@@ -386,7 +386,7 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 
 /* Reclaim resources after transmission completes
  */
-static int tse_tx_complete(struct altera_tse_private *priv, int q, int budget)
+static int tse_tx_complete(struct altera_tse_private *priv, int q)
 {
 	unsigned int txsize = priv->tx_ring_size;
 	u32 ready;
@@ -396,7 +396,7 @@ static int tse_tx_complete(struct altera_tse_private *priv, int q, int budget)
 	ready = priv->dmaops->tx_completions(priv, q);
 
 	/* Free sent buffers */
-	while (ready && budget && (priv->tx_cons[q] != priv->tx_prod[q])) {
+	while (ready && (priv->tx_cons[q] != priv->tx_prod[q])) {
 		entry = priv->tx_cons[q] % txsize;
 		tx_buff = &priv->tx_ring[q][entry];
 
@@ -409,16 +409,7 @@ static int tse_tx_complete(struct altera_tse_private *priv, int q, int budget)
 
 		tse_free_tx_buffer(priv, tx_buff);
 		priv->tx_cons[q]++;
-		budget--;
 		ready = priv->dmaops->tx_completions(priv, q);
-	}
-
-	if (unlikely(netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q)) &&
-		     tse_tx_avail(priv, q) > TSE_TX_THRESH(priv))) {
-		if (netif_msg_tx_done(priv))
-			netdev_dbg(priv->dev, "%s: Queue %d restart transmit\n",
-				   __func__, q);
-		netif_wake_subqueue(priv->dev, q);
 	}
 
 	return (ready == 0);
@@ -431,31 +422,34 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 	struct altera_tse_q_vector *q_vector =
 			container_of(napi, struct altera_tse_q_vector, napi);
 	struct altera_tse_private *priv = q_vector->priv;
-	int txclean = 0;
-	int work = budget;
 	unsigned long int flags;
 	int q = q_vector->queue;
+	int work = budget;
 
 	spin_lock(&q_vector->tx_lock);
-	txclean = tse_tx_complete(priv, q, budget);
+	priv->dmaops->clear_txirq(priv, q);
 
-	if (txclean && !netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q))) {
-		spin_unlock(&q_vector->tx_lock);
+	(void) tse_tx_complete(priv, q);
+
+	if (unlikely(netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q)) &&
+		     tse_tx_avail(priv, q) > TSE_TX_THRESH(priv))) {
+		if (netif_msg_tx_done(priv))
+			netdev_dbg(priv->dev, "%s: Queue %d restart transmit\n",
+				   __func__, q);
+		netif_wake_subqueue(priv->dev, q);
+		work = budget;
+
+	} else {
 		napi_complete(napi);
 
-		netdev_dbg(priv->dev,
-			   "TX[%d] NAPI Complete, %s with budget %d\n",
-			   q, txclean ? "clean" : "dirty", budget);
-
 		spin_lock_irqsave(&priv->txdma_irq_lock, flags);
-		priv->dmaops->clear_txirq(priv, q);
 		priv->dmaops->enable_txirq(priv, q);
 		spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
-
-		return 0;
+		work = 0;
 	}
 
 	spin_unlock(&q_vector->tx_lock);
+
 	return work;
 }
 
@@ -527,8 +521,12 @@ static irqreturn_t altera_isr_tx(int irq, void *dev_id)
 
 	priv = netdev_priv(dev);
 
-	/* reset TX IRQs */
 	for (q = 0; q < priv->num_queues; q++) {
+		spin_lock(&priv->txdma_irq_lock);
+		/* reset TX IRQ */
+		priv->dmaops->clear_txirq(priv, q);
+		spin_unlock(&priv->txdma_irq_lock);
+
 		if (likely(napi_schedule_prep(&priv->q_vector[q].napi))) {
 			spin_lock(&priv->txdma_irq_lock);
 			priv->dmaops->disable_txirq(priv, q);
@@ -579,8 +577,8 @@ static int tse_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			netif_stop_subqueue(dev, q);
 			/* This is a hard error, log it. */
 			netdev_err(priv->dev,
-				   "%s: Tx list full when queue awake\n",
-				   __func__);
+				   "%s: Tx list full when queue %d awake\n",
+				   __func__, q);
 		}
 		ret = NETDEV_TX_BUSY;
 		dev->stats.tx_fifo_errors++;
