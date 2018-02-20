@@ -81,6 +81,11 @@ static int tsn_queue_threshold = TSN_QUEUE_THRESHOLD;
 module_param(tsn_queue_threshold, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(tsn_queue_threshold, "Set threshold for tsn queue");
 
+#define MAX_TX_QUEUE_COUNT 2
+static int tx_queue_count = MAX_TX_QUEUE_COUNT;
+module_param(tx_queue_count, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(tx_queue_count, "Set number of tx queues");
+
 
 #define POLL_PHY (-1)
 
@@ -1178,6 +1183,12 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	priv->dev = ndev;
 	priv->msg_enable = netif_msg_init(debug, default_msg_level);
 
+	if (tx_queue_count < 1 || tx_queue_count > MAX_TX_QUEUE_COUNT) {
+		ret= -ENODEV;
+		goto error;
+	}
+	priv->num_queues = tx_queue_count;
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (res == NULL) {
 		dev_err(&pdev->dev, "memory resource not defined\n");
@@ -1216,8 +1227,6 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
 	priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
 	priv->rx_dma_resp = base + driver_data->rx_dma_resp_offset;
-
-	priv->num_queues = 2;
 
 	/* setup per queue xmit counter */
 	priv->cnt_queue_xmit = kzalloc(priv->num_queues* sizeof(*priv->cnt_queue_xmit),
@@ -1325,9 +1334,10 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	priv->revision = ioread32(&priv->mac_dev->megacore_revision);
 
 	if (netif_msg_probe(priv))
-		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d at 0x%08lx irq %d/%d\n",
+		dev_info(&pdev->dev, "Altera TSE MAC version %d.%d, %d tx_queues at 0x%08lx irq %d/%d\n",
 				(priv->revision >> 8) & 0xff,
 				priv->revision & 0xff,
+				priv->num_queues,
 				(unsigned long) ndev->mem_start, priv->rx_irq,
 				priv->tx_irq);
 
