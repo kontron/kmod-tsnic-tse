@@ -131,6 +131,12 @@
 #define SGMII_PCS_READ_TO	0x16
 #define SGMII_PCS_SW_RESET_TIMEOUT 100 /* usecs */
 
+/*  Scheduler Config Register
+ */
+#define SCHED_CFG_OFFSET	0
+#define SCHED_CFG_RESET			BIT(0)
+#define SCHED_CFG_RESET_GET(v)		GET_BIT_VALUE(v, 0)
+
 /* MDIO registers within MAC register Space
  */
 struct altera_tse_mdio {
@@ -433,6 +439,9 @@ struct altera_tse_private {
 
 	/* TSE Revision */
 	u32	revision;
+
+	/* general management address space */
+	void __iomem *mgmt_dev;
 
 	/* mSGDMA Rx Dispatcher address space */
 	void __iomem *rx_dma_csr;

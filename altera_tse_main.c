@@ -111,6 +111,7 @@ struct altera_tse_kontron_driver_data
 	int rx_dma_csr_offset;
 	int tx_dma_desc_offset[2];
 	int tx_dma_csr_offset[2];
+	int mgmt_offset;
 
 	const struct altera_dmaops *dmaops;
 	int dmamask;
@@ -732,6 +733,32 @@ static void tse_update_mac_addr(struct altera_tse_private *priv, u8 *addr)
 	csrwr32(lsb, priv->mac_dev, tse_csroffs(mac_addr_1));
 }
 
+static int reset_scheduler(struct altera_tse_private *priv)
+{
+	int counter;
+	u32 dat;
+
+	dat = csrrd32(priv->mgmt_dev, SCHED_CFG_OFFSET);
+	dat |= SCHED_CFG_RESET;
+	csrwr32(dat, priv->mgmt_dev, SCHED_CFG_OFFSET);
+
+	counter = 0;
+	while (counter++ < ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
+		if ((csrrd32(priv->mgmt_dev, SCHED_CFG_OFFSET) & SCHED_CFG_RESET) == 0) 
+			break;
+		udelay(1);
+	}
+
+	if (counter >= ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
+		dat = csrrd32(priv->mgmt_dev, SCHED_CFG_OFFSET);
+		dat &= ~SCHED_CFG_RESET;
+		csrwr32(dat, priv->mgmt_dev, SCHED_CFG_OFFSET);
+		return -1;
+	}
+
+	return 0;
+}
+
 /* MAC software reset.
  * When reset is triggered, the MAC function completes the current
  * transmission or reception, and subsequently disables the transmit and
@@ -1004,6 +1031,11 @@ static int tse_open(struct net_device *dev)
 
 	/* no PCS initialization, MAC does not operate in SGMII mode*/
 
+	/* reset priority scheduler */
+	ret = reset_scheduler(priv);
+	if (ret)
+		netdev_err(dev, "Cannot reset scheduler core (error: %d)\n", ret);
+
 	ret = reset_mac(priv);
 	/* Note that reset_mac will fail if the clocks are gated by the PHY
 	 * due to the PHY being put into isolation or power down mode.
@@ -1223,6 +1255,8 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 
 	/* MAC address space */
 	priv->mac_dev = base + driver_data->mac_dev_offset;
+	/* management address space */
+	priv->mgmt_dev = base + driver_data->mgmt_offset;
 	/* xSGDMA Rx Dispatcher, CSR and response buffer address spaces */
 	priv->rx_dma_csr = base + driver_data->rx_dma_csr_offset;
 	priv->rx_dma_desc = base + driver_data->rx_dma_desc_offset;
@@ -1402,6 +1436,7 @@ static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
 		.rx_dma_resp_offset = 0x880,
 		.tx_dma_csr_offset = {0x800, 0x900},
 		.tx_dma_desc_offset = {0x820, 0x920},
+		.mgmt_offset = 0x400,
 
 		.dmaops = &altera_dtype_msgdma,
 
