@@ -3,8 +3,8 @@
 %define kernel_release %KERNEL_RELEASE%
 %define destdir /lib/modules/%{kernel_build}/extra
 
-Summary: DEIP Driver for the Kontron TSNIC
-Name: tsnic-deip
+Summary: TSE Driver for the Kontron TSNIC
+Name: tsnic-tse
 Packager: Kontron
 Vendor: Kontron
 
@@ -20,7 +20,7 @@ BuildRequires: kernel-rt-devel = %{kernel_version}
 %define debug_package %{nil}
 
 %description
-Driver for TSNIC Deteministic Ethernet IP (DEIP) Switch
+Driver for tsnic Triple Speed Ethernet (TSE) MAC
 
 %prep
 %autosetup -n %SRC_PACKAGE_NAME%
@@ -39,4 +39,4 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root)
-%{destdir}/tsnic-deip.ko
+%{destdir}/tsnic-tse.ko
