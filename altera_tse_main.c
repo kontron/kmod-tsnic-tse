@@ -1316,10 +1316,6 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	 */
 	priv->rx_dma_buf_sz = ALTERA_RXDMABUFFER_SIZE;
 
-	/* set random MAC address */
-	eth_hw_addr_random(ndev);
-	/* TODO: read MAC address from some EEPROM */
-
 	/* initialize netdev */
 	ndev->mem_start = res->start;
 	ndev->mem_end = res->end;
@@ -1344,6 +1340,16 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	 * extra 4-byte VLAN tag for processing by upper layers
 	 */
 	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX;
+
+	/* setup eth addr */
+	res = platform_get_resource(pdev, IORESOURCE_REG, 0);
+	if (res == NULL) {
+		/* set random MAC address */
+		eth_hw_addr_random(ndev);
+		dev_warn(&pdev->dev, "Generating random eth_addr\n");
+	} else {
+		ether_addr_copy(ndev->dev_addr, (const u8*)res->start);
+	}
 
 	/* setup NAPI interface */
 	netif_napi_add(ndev, &priv->napi, tse_poll, NAPI_POLL_WEIGHT);
