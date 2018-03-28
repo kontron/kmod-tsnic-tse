@@ -237,9 +237,6 @@ static void tse_get_regs(struct net_device *dev, struct ethtool_regs *regs,
 
 	for (i = 0; i < TSE_NUM_REGS; i++)
 		buf[i] = csrrd32(priv->mac_dev, i * 4);
-
-	for (i = 0; i < 0x8; i++)
-		printk("tx_dma_csr + %d = 0x%08x\n", i, csrrd32(priv->tx_dma_csr, i * 4));
 }
 
 static const struct ethtool_ops tse_ethtool_ops = {
