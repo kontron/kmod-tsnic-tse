@@ -1310,6 +1310,8 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 
 	/* Max MTU is 1500, ETH_DATA_LEN */
 	priv->max_mtu = driver_data->max_mtu;
+	/* Setup max_mtu by default */
+	ndev->mtu = priv->max_mtu;
 
 	/* The DMA buffer size already accounts for an alignment bias
 	 * to avoid unaligned access exceptions for the host processor,
