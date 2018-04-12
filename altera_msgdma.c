@@ -211,7 +211,7 @@ u32 msgdma_rx_status(struct altera_tse_private *priv)
 u16 msgdma_get_rsp_level(struct altera_tse_private *priv)
 {
 	int rx_fill_level = csrrd32(priv->rx_dma_csr,
-			msgdma_csroffs(resp_fill_level) & 0xff);
+			msgdma_csroffs(resp_fill_level)) & 0xffff;
 
 	return rx_fill_level;
 }
