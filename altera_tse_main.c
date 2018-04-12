@@ -390,7 +390,7 @@ static int tse_tx_complete(struct altera_tse_private *priv, int q)
 
 		if (netif_msg_tx_done(priv))
 			netdev_dbg(priv->dev, "%s: curr %d, dirty %d\n",
-				   __func__, priv->tx_prod[0], priv->tx_cons[0]);
+				   __func__, priv->tx_prod[q], priv->tx_cons[q]);
 
 		if (likely(tx_buff->skb))
 			priv->dev->stats.tx_packets++;
