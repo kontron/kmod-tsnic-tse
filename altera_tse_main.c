@@ -415,7 +415,9 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 	int work = budget;
 
 	spin_lock(&q_vector->tx_lock);
+	spin_lock_irqsave(&priv->txdma_irq_lock, flags);
 	priv->dmaops->clear_txirq(priv, q);
+	spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
 
 	(void) tse_tx_complete(priv, q);
 
