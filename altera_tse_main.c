@@ -1101,7 +1101,7 @@ static int tse_open(struct net_device *dev)
 	spin_unlock(&priv->mac_cfg_lock);
 
 	/* Register RX interrupt */
-	ret = request_irq(priv->rx_irq, altera_isr, IRQF_SHARED,
+	ret = request_irq(priv->rx_irq, altera_isr, 0,
 			  dev->name, dev);
 	if (ret) {
 		netdev_err(dev, "Unable to register RX interrupt %d\n",
@@ -1110,7 +1110,7 @@ static int tse_open(struct net_device *dev)
 	}
 
 	/* Register TX interrupt */
-	ret = request_irq(priv->tx_irq, altera_isr_tx, IRQF_SHARED,
+	ret = request_irq(priv->tx_irq, altera_isr_tx, 0,
 			  dev->name, dev);
 	if (ret) {
 		netdev_err(dev, "Unable to register TX interrupt %d\n",
