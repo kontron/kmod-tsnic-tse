@@ -1,4 +1,7 @@
-/* Altera Triple-Speed Ethernet MAC driver
+/* Altera Triple-Speed Ethernet MAC driver for the Kontron TSNIC
+ * Copyright (C) 2017-2018 Kontron Europe GmbH. All rights reserved
+ *
+ * Altera Triple-Speed Ethernet MAC driver
  * Copyright (C) 2008-2014 Altera Corporation. All rights reserved
  *
  * Contributors:
