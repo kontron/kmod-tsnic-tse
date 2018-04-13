@@ -430,7 +430,7 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 		work = budget;
 
 	} else {
-		napi_complete(napi);
+		napi_complete_done(napi, work);
 
 		spin_lock_irqsave(&priv->txdma_irq_lock, flags);
 		priv->dmaops->enable_txirq(priv, q);
