@@ -400,7 +400,7 @@ static int tse_tx_complete(struct altera_tse_private *priv, int q)
 		ready = priv->dmaops->tx_completions(priv, q);
 	}
 
-	return (ready == 0);
+	return ((ready == 0) && (priv->tx_cons[q] == priv->tx_prod[q]));
 }
 
 /* TX NAPI polling function
@@ -413,13 +413,14 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 	unsigned long int flags;
 	int q = q_vector->queue;
 	int work = budget;
+	int complete;
 
 	spin_lock(&q_vector->tx_lock);
 	spin_lock_irqsave(&priv->txdma_irq_lock, flags);
 	priv->dmaops->clear_txirq(priv, q);
 	spin_unlock_irqrestore(&priv->txdma_irq_lock, flags);
 
-	(void) tse_tx_complete(priv, q);
+	complete = tse_tx_complete(priv, q);
 
 	if (unlikely(netif_tx_queue_stopped(netdev_get_tx_queue(priv->dev, q)) &&
 		     tse_tx_avail(priv, q) > TSE_TX_THRESH(priv))) {
@@ -427,8 +428,10 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 			netdev_dbg(priv->dev, "%s: Queue %d restart transmit\n",
 				   __func__, q);
 		netif_wake_subqueue(priv->dev, q);
-		work = budget;
+	}
 
+	 if (!complete) {
+		work = budget;
 	} else {
 		napi_complete_done(napi, work);
 
@@ -451,7 +454,6 @@ static int tse_poll(struct napi_struct *napi, int budget)
 			container_of(napi, struct altera_tse_private, napi);
 	const struct altera_dmaops *dmaops = priv->dmaops;
 	int work_done = 0;
-	int work = budget;
 	unsigned long int flags;
 
 	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
@@ -473,7 +475,7 @@ static int tse_poll(struct napi_struct *napi, int budget)
 		return 0;
 	}
 
-	return work;
+	return budget;
 }
 
 /* DMA RX FIFO interrupt routing
@@ -515,11 +517,6 @@ static irqreturn_t altera_isr_tx(int irq, void *dev_id)
 	priv = netdev_priv(dev);
 
 	for (q = 0; q < priv->num_queues; q++) {
-		spin_lock(&priv->txdma_irq_lock);
-		/* reset TX IRQ */
-		priv->dmaops->clear_txirq(priv, q);
-		spin_unlock(&priv->txdma_irq_lock);
-
 		if (likely(napi_schedule_prep(&priv->q_vector[q].napi))) {
 			spin_lock(&priv->txdma_irq_lock);
 			priv->dmaops->disable_txirq(priv, q);
