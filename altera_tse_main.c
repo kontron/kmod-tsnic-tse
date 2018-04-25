@@ -432,9 +432,7 @@ static int tse_poll_tx(struct napi_struct *napi, int budget)
 		netif_wake_subqueue(priv->dev, q);
 	}
 
-	 if (!complete) {
-		work = budget;
-	} else {
+	 if (complete) {
 		napi_complete_done(napi, work);
 
 		spin_lock_irqsave(&priv->txdma_irq_lock, flags);
