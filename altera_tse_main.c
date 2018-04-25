@@ -319,10 +319,12 @@ static int tse_rx(struct altera_tse_private *priv, int limit)
 		pktstatus = rxstatus >> 16;
 		pktlength = rxstatus & 0xffff;
 
-		if ((pktstatus & 0xFF) || (pktlength == 0))
+		if ((pktstatus & 0xFF) || (pktlength == 0)) {
 			netdev_err(priv->dev,
 				   "RCV pktstatus %08X pktlength %08X\n",
 				   pktstatus, pktlength);
+			priv->dev->stats.rx_errors++;
+		}
 
 		count++;
 		next_entry = (++priv->rx_cons) % priv->rx_ring_size;
