@@ -456,10 +456,6 @@ static int tse_poll(struct napi_struct *napi, int budget)
 	int work_done = 0;
 	unsigned long int flags;
 
-	spin_lock_irqsave(&priv->rxdma_irq_lock, flags);
-	dmaops->clear_rxirq(priv);
-	spin_unlock_irqrestore(&priv->rxdma_irq_lock, flags);
-
 	work_done = tse_rx(priv, budget);
 
 	if (work_done < budget && (dmaops->get_rsp_level(priv) == 0)) {
@@ -497,6 +493,10 @@ static irqreturn_t altera_isr(int irq, void *dev_id)
 		spin_unlock(&priv->rxdma_irq_lock);
 		__napi_schedule(&priv->napi);
 	}
+
+	spin_lock(&priv->rxdma_irq_lock);
+	priv->dmaops->clear_rxirq(priv);
+	spin_unlock(&priv->rxdma_irq_lock);
 
 	return IRQ_HANDLED;
 }
