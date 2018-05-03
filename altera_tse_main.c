@@ -749,7 +749,7 @@ static int reset_scheduler(struct altera_tse_private *priv)
 
 	counter = 0;
 	while (counter++ < ALTERA_TSE_SW_RESET_WATCHDOG_CNTR) {
-		if ((csrrd32(priv->mgmt_dev, SCHED_CFG_OFFSET) & SCHED_CFG_RESET) == 0)
+		if ((csrrd32(priv->mgmt_dev, SCHED_CFG_OFFSET) & SCHED_CFG_RESET) == 0) 
 			break;
 		udelay(1);
 	}
