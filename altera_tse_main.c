@@ -1457,7 +1457,7 @@ static const struct altera_tse_kontron_driver_data kontron_drv_data[] = {
 		.tx_irq = 2,
 
 		.rx_fifo_depth = 2048,
-		.tx_fifo_depth = 2048,
+		.tx_fifo_depth = 512,
 		.hash_filter = 1,
 		.added_unicast = 1,
 		.max_mtu = ETH_DATA_LEN + 2,
