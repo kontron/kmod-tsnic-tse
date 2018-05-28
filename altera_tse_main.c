@@ -47,6 +47,7 @@
 #include <linux/phy_fixed.h>
 #include <linux/platform_device.h>
 #include <linux/skbuff.h>
+#include <linux/property.h>
 #include <asm/cacheflush.h>
 
 #include "altera_utils.h"
@@ -1349,13 +1350,10 @@ static int altera_tse_platform_probe(struct platform_device *pdev)
 	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX;
 
 	/* setup eth addr */
-	res = platform_get_resource(pdev, IORESOURCE_REG, 0);
-	if (res == NULL) {
+	if (!device_get_mac_address(&pdev->dev, ndev->dev_addr, ETH_ALEN)) {
 		/* set random MAC address */
 		eth_hw_addr_random(ndev);
 		dev_warn(&pdev->dev, "Generating random eth_addr\n");
-	} else {
-		ether_addr_copy(ndev->dev_addr, (const u8*)res->start);
 	}
 
 	/* setup NAPI interface */
