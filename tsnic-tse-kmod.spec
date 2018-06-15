@@ -13,7 +13,7 @@ Release: %SNAPSHOT%+%{kernel_release}%{?dist}
 License: GPL
 Source: %SRC_PACKAGE_NAME%.tar.gz
 
-Requires: kernel-rt-core = %{kernel_version}
+Requires: kernel-rt-core = %{kernel_version}, tsnic-core >= 0.1.0
 BuildRequires: kernel-rt-devel = %{kernel_version}
 
 # Disable the building of the debug package(s).
